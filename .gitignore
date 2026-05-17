@@ -1,0 +1,22 @@
+# OS junk
+.DS_Store
+Thumbs.db
+ehthumbs.db
+desktop.ini
+
+# Editor / IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Env files (these can carry real secrets; ignore by default)
+.env
+.env.local
+.env.*.local
+
+# Local notes and scratch
+TODO.local.md
+NOTES.local.md
+.scratch/
