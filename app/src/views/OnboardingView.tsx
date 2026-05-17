@@ -1,6 +1,8 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { isTauri } from '../lib/env';
 import { BrokerageLogo } from '../components/BrokerageLogo';
+import { importCsv } from '../lib/importers';
+import type { ImporterResult, ParsedTransaction } from '../lib/importers/types';
 
 const STEPS = ['Welcome', 'About you', 'Your goal', 'Your first account', "You're set"];
 // Bigger pool of playful account names; 5 randomly chosen per onboarding session.
@@ -53,8 +55,16 @@ type Profile = {
   theme: 'light' | 'dark';
 };
 
+export type OnboardingUpload = {
+  fileName: string;
+  brokerage: string;
+  accountType: string;
+  accountName: string;
+  transactions: ParsedTransaction[];
+};
+
 type Props = {
-  onComplete: (state?: { profile: Profile; goal: number }) => void;
+  onComplete: (state?: { profile: Profile; goal: number; uploads?: OnboardingUpload[] }) => void;
   onSkip: () => void;
   /** Live-preview the chosen theme as the user toggles in step 1. */
   onPreviewTheme?: (t: 'light' | 'dark') => void;
@@ -70,18 +80,15 @@ export function OnboardingView({ onComplete, onSkip, onPreviewTheme }: Props) {
     theme: 'light',
   });
   const [goal, setGoal] = useState(3_000_000);
-  const [milestoneFocus, setMilestoneFocus] = useState<string[]>([]);
-  const [addAccountStep, setAddAccountStep] = useState<'drop' | 'review'>('drop');
-  const [accountName, setAccountName] = useState('The Lighthouse');
-  const [accountNameMode, setAccountNameMode] = useState<'fun' | 'custom' | 'default'>('fun');
-  const [customAccountName, setCustomAccountName] = useState('');
+  const [uploads, setUploads] = useState<OnboardingUpload[]>([]);
 
   const next = () => setStep(s => Math.min(STEPS.length - 1, s + 1));
   const back = () => setStep(s => Math.max(0, s - 1));
 
   const canAdvance = (() => {
     if (step === 1) return profile.name.trim().length > 0;
-    if (step === 3) return addAccountStep === 'review';
+    // Step 3 is the account import; you can advance with or without uploads
+    // (skip CTA still works and lands you on the empty Home).
     return true;
   })();
 
@@ -118,33 +125,19 @@ export function OnboardingView({ onComplete, onSkip, onPreviewTheme }: Props) {
         {step === 1 && (
           <ProfileStep profile={profile} setProfile={setProfile} onPreviewTheme={onPreviewTheme} />
         )}
-        {step === 2 && (
-          <GoalStep
-            profile={profile}
-            goal={goal}
-            setGoal={setGoal}
-            milestoneFocus={milestoneFocus}
-            setMilestoneFocus={setMilestoneFocus}
-          />
-        )}
+        {step === 2 && <GoalStep profile={profile} goal={goal} setGoal={setGoal} />}
         {step === 3 && (
           <AddAccountStep
-            stage={addAccountStep}
-            onAdvance={() => setAddAccountStep('review')}
-            accountName={accountName}
-            setAccountName={setAccountName}
-            nameMode={accountNameMode}
-            setNameMode={setAccountNameMode}
-            customName={customAccountName}
-            setCustomName={setCustomAccountName}
+            uploads={uploads}
+            setUploads={setUploads}
           />
         )}
         {step === 4 && (
           <DoneStep
             profile={profile}
             goal={goal}
-            accountName={accountName}
-            onEnter={() => onComplete({ profile, goal })}
+            uploads={uploads}
+            onEnter={() => onComplete({ profile, goal, uploads })}
           />
         )}
       </div>
@@ -316,14 +309,16 @@ function ProfileStep({
                 −
               </button>
               <input
-                type="number"
+                type="text"
                 inputMode="numeric"
+                pattern="\d*"
+                maxLength={4}
                 value={birthStr}
-                min={1920}
-                max={2020}
                 onChange={e => {
-                  setBirthStr(e.target.value);
-                  commitInRange(e.target.value, 1920, 2020, 'birthYear');
+                  // Digits only, cap at 4 chars so the user can't type "19850" past a 4-digit year.
+                  const cleaned = e.target.value.replace(/\D/g, '').slice(0, 4);
+                  setBirthStr(cleaned);
+                  commitInRange(cleaned, 1920, 2020, 'birthYear');
                 }}
                 onBlur={e => {
                   const v = clampAndSet(e.target.value, 1920, 2020, 'birthYear');
@@ -346,23 +341,25 @@ function ProfileStep({
             <label>When do you want to clock out?</label>
             <div className="ob-stepper">
               <button
-                onClick={() => set('retireAge', Math.max(40, profile.retireAge - 1))}
+                onClick={() => set('retireAge', Math.max(25, profile.retireAge - 1))}
                 aria-label="Decrease retirement age"
               >
                 −
               </button>
               <input
-                type="number"
+                type="text"
                 inputMode="numeric"
+                pattern="\d*"
+                maxLength={2}
                 value={retireStr}
-                min={40}
-                max={85}
                 onChange={e => {
-                  setRetireStr(e.target.value);
-                  commitInRange(e.target.value, 40, 85, 'retireAge');
+                  // Digits only, max 2 chars (we cap at 85).
+                  const cleaned = e.target.value.replace(/\D/g, '').slice(0, 2);
+                  setRetireStr(cleaned);
+                  commitInRange(cleaned, 25, 85, 'retireAge');
                 }}
                 onBlur={e => {
-                  const v = clampAndSet(e.target.value, 40, 85, 'retireAge');
+                  const v = clampAndSet(e.target.value, 25, 85, 'retireAge');
                   setRetireStr(String(v));
                 }}
                 className="ob-stepper-input"
@@ -425,18 +422,17 @@ function ProfileStep({
   );
 }
 
+const GOAL_MIN = 500_000;
+const GOAL_MAX = 25_000_000;
+
 function GoalStep({
   profile,
   goal,
   setGoal,
-  milestoneFocus,
-  setMilestoneFocus,
 }: {
   profile: Profile;
   goal: number;
   setGoal: (n: number) => void;
-  milestoneFocus: string[];
-  setMilestoneFocus: (s: string[]) => void;
 }) {
   const yearsOut = Math.max(1, profile.retireAge - (2026 - profile.birthYear));
   const tagline =
@@ -446,20 +442,14 @@ function GoalStep({
       ? 'Comfortable retirement number'
       : goal < 5_000_000
       ? 'Ambitious, fully achievable'
-      : 'Pillar-of-the-community territory';
+      : goal < 10_000_000
+      ? 'Pillar-of-the-community territory'
+      : 'Generational money';
 
-  const focusOptions = [
-    { id: 'first_million', label: 'First million', hint: 'Crossing $1M' },
-    { id: 'beat_spy', label: 'Beat the S&P', hint: 'In a calendar year' },
-    { id: 'hsa_covered', label: 'HSA covers health', hint: 'Retirement-ready' },
-    { id: 'first_500k', label: 'Half a million', hint: 'On the way up' },
-    { id: 'maxed_ira', label: 'Max the IRA', hint: 'Every tax year' },
-    { id: 'survived', label: 'Hold through a dip', hint: 'Discipline test' },
-  ];
-
-  const toggleFocus = (id: string) => {
-    setMilestoneFocus(milestoneFocus.includes(id) ? milestoneFocus.filter(f => f !== id) : [...milestoneFocus, id]);
-  };
+  // Local string buffer for the typeable goal field, same pattern as the
+  // birth-year / retire-age inputs above. Sync down on slider movement.
+  const [goalStr, setGoalStr] = useState(formatGoalInput(goal));
+  useEffect(() => setGoalStr(formatGoalInput(goal)), [goal]);
 
   return (
     <div className="ob-step">
@@ -476,15 +466,15 @@ function GoalStep({
       <div className="ob-goal">
         <div className="ob-goal-big">
           <span className="dollar">$</span>
-          {(goal / 1_000_000).toFixed(1)}
+          {(goal / 1_000_000).toFixed(goal >= 10_000_000 ? 0 : 1)}
           <span className="cents">M</span>
         </div>
         <div className="ob-goal-tagline">{tagline}</div>
 
         <input
           type="range"
-          min="500000"
-          max="10000000"
+          min={GOAL_MIN}
+          max={GOAL_MAX}
           step="50000"
           value={goal}
           onChange={e => setGoal(+e.target.value)}
@@ -493,9 +483,60 @@ function GoalStep({
         />
         <div className="ob-goal-scale">
           <span>$500K</span>
-          <span>$2.5M</span>
           <span>$5M</span>
-          <span>$10M</span>
+          <span>$15M</span>
+          <span>$25M</span>
+        </div>
+
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 10, marginTop: 14 }}>
+          <span className="muted" style={{ fontSize: 12, fontFamily: 'var(--font-mono)' }}>or type it:</span>
+          <span
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              border: '1px solid var(--line)',
+              borderRadius: 8,
+              background: 'var(--paper)',
+              padding: '4px 10px',
+              gap: 2,
+              fontFamily: 'var(--font-mono)',
+              fontSize: 16,
+              color: 'var(--ink)',
+            }}
+          >
+            <span style={{ color: 'var(--ink-3)' }}>$</span>
+            <input
+              type="text"
+              inputMode="numeric"
+              value={goalStr}
+              onChange={e => {
+                // Allow digits + commas in display; strip commas when parsing.
+                const cleaned = e.target.value.replace(/[^\d,]/g, '');
+                setGoalStr(cleaned);
+                const n = parseInt(cleaned.replace(/,/g, ''), 10);
+                if (!Number.isNaN(n) && n >= GOAL_MIN && n <= GOAL_MAX) {
+                  setGoal(n);
+                }
+              }}
+              onBlur={e => {
+                const n = parseInt(e.target.value.replace(/,/g, ''), 10);
+                const clamped = Number.isNaN(n) ? goal : Math.max(GOAL_MIN, Math.min(GOAL_MAX, n));
+                setGoal(clamped);
+                setGoalStr(formatGoalInput(clamped));
+              }}
+              style={{
+                width: 140,
+                border: 'none',
+                outline: 'none',
+                background: 'transparent',
+                font: 'inherit',
+                fontVariantNumeric: 'tabular-nums',
+                color: 'inherit',
+                textAlign: 'left',
+              }}
+              aria-label="Goal in dollars"
+            />
+          </span>
         </div>
 
         <div className="ob-goal-meta">
@@ -540,184 +581,287 @@ function GoalStep({
         </div>
       </div>
 
-      <div className="ob-milestones">
-        <div className="ob-step-eyebrow" style={{ marginBottom: 10 }}>
-          Milestones to celebrate · pick a few
-        </div>
-        <div className="ob-milestone-grid">
-          {focusOptions.map(o => (
-            <button
-              key={o.id}
-              onClick={() => toggleFocus(o.id)}
-              className={`ob-milestone ${milestoneFocus.includes(o.id) ? 'active' : ''}`}
-            >
-              <span className="ob-milestone-check">{milestoneFocus.includes(o.id) ? '✓' : ''}</span>
-              <div>
-                <div className="ob-milestone-label">{o.label}</div>
-                <div className="ob-milestone-hint">{o.hint}</div>
-              </div>
-            </button>
-          ))}
-        </div>
-      </div>
     </div>
   );
 }
 
+function formatGoalInput(n: number): string {
+  return n.toLocaleString('en-US');
+}
+
+const ACCOUNT_TYPE_LABEL: Record<string, string> = {
+  taxable: 'Taxable',
+  trad_ira: 'Traditional IRA',
+  roth_ira: 'Roth IRA',
+  '401k': '401(k)',
+  hsa: 'HSA',
+  other: 'Brokerage',
+  unknown: 'Brokerage',
+};
+
+function defaultTechName(brokerage: string, accountType: string): string {
+  return `${brokerage} ${ACCOUNT_TYPE_LABEL[accountType] || 'Brokerage'}`.trim();
+}
+
 function AddAccountStep({
-  stage,
-  onAdvance,
-  accountName,
-  setAccountName,
-  nameMode,
-  setNameMode,
-  customName,
-  setCustomName,
+  uploads,
+  setUploads,
 }: {
-  stage: 'drop' | 'review';
-  onAdvance: () => void;
-  accountName: string;
-  setAccountName: (s: string) => void;
-  nameMode: 'fun' | 'custom' | 'default';
-  setNameMode: (m: 'fun' | 'custom' | 'default') => void;
-  customName: string;
-  setCustomName: (s: string) => void;
+  uploads: OnboardingUpload[];
+  setUploads: (u: OnboardingUpload[]) => void;
 }) {
-  // Stable random selection per onboarding session — different names each fresh run.
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [dragging, setDragging] = useState(false);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+
+  // Random selection of fun names; stable per session so suggestions don't reshuffle on every keystroke.
   const suggestNames = useMemo(() => pickFunNames(Date.now() % 9973, 5), []);
+
+  async function ingestFiles(files: FileList | File[]) {
+    setErrorMsg(null);
+    const list = Array.from(files);
+    const added: OnboardingUpload[] = [];
+    for (const file of list) {
+      try {
+        const text = await file.text();
+        const result: ImporterResult & { importerId: string | null } = importCsv(text);
+        if (result.rejectionReason) {
+          setErrorMsg(`${file.name}: ${result.rejectionReason}`);
+          continue;
+        }
+        if (!result.importerId || result.transactions.length === 0) {
+          setErrorMsg(
+            `${file.name}: we couldn't figure this CSV out automatically. After onboarding, drop it in via Add Account for the column-mapping wizard.`,
+          );
+          continue;
+        }
+        const brokerage = result.inferences.brokerage;
+        const accountType = result.inferences.accountType === 'unknown' ? 'taxable' : result.inferences.accountType;
+        added.push({
+          fileName: file.name,
+          brokerage,
+          accountType,
+          accountName: defaultTechName(brokerage, accountType),
+          transactions: result.transactions,
+        });
+      } catch (e: any) {
+        setErrorMsg(`${file.name}: ${e?.message || 'could not read file'}`);
+      }
+    }
+    if (added.length) setUploads([...uploads, ...added]);
+  }
+
+  function pickFile() {
+    fileInputRef.current?.click();
+  }
+
+  function removeUpload(i: number) {
+    setUploads(uploads.filter((_, idx) => idx !== i));
+  }
+
+  function setUploadName(i: number, name: string) {
+    setUploads(uploads.map((u, idx) => (idx === i ? { ...u, accountName: name } : u)));
+  }
+  function setUploadType(i: number, type: string) {
+    setUploads(
+      uploads.map((u, idx) =>
+        idx === i ? { ...u, accountType: type, accountName: defaultTechName(u.brokerage, type) } : u,
+      ),
+    );
+  }
+
   return (
     <div className="ob-step">
       <div className="ob-step-head">
-        <div className="ob-step-eyebrow">Step 3 · Bring your numbers in</div>
-        <h2 className="ob-step-title">Drop in your first CSV.</h2>
+        <h2 className="ob-step-title">Bring in your accounts.</h2>
         <p className="ob-step-sub">
-          You can keep adding accounts later. Don't see your brokerage in the list? Drop it anyway, we'll fall back
-          to a column mapper.
+          Drop one or more CSVs from any supported brokerage. Read locally, never uploaded. You can keep adding
+          more later from the sidebar.
         </p>
       </div>
 
-      {stage === 'drop' && (
-        <>
-          <div className="dropzone" onClick={onAdvance}>
-            <div className="dropzone-glyph">
-              <svg width="48" height="48" viewBox="0 0 48 48" fill="none" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M24 30V8" />
-                <path d="M14 18l10-10 10 10" />
-                <path d="M8 32v6a2 2 0 0 0 2 2h28a2 2 0 0 0 2-2v-6" />
-              </svg>
+      <div
+        className={`dropzone ${dragging ? 'dragging' : ''}`}
+        onClick={pickFile}
+        onDragOver={e => {
+          e.preventDefault();
+          setDragging(true);
+        }}
+        onDragLeave={() => setDragging(false)}
+        onDrop={e => {
+          e.preventDefault();
+          setDragging(false);
+          if (e.dataTransfer.files?.length) void ingestFiles(e.dataTransfer.files);
+        }}
+      >
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept=".csv,text/csv"
+          multiple
+          hidden
+          onChange={e => {
+            if (e.target.files?.length) void ingestFiles(e.target.files);
+            e.target.value = '';
+          }}
+        />
+        <div className="dropzone-glyph">
+          <svg width="48" height="48" viewBox="0 0 48 48" fill="none" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M24 30V8" />
+            <path d="M14 18l10-10 10 10" />
+            <path d="M8 32v6a2 2 0 0 0 2 2h28a2 2 0 0 0 2-2v-6" />
+          </svg>
+        </div>
+        <div className="dropzone-title">Drop CSV files here</div>
+        <div className="dropzone-sub">Or click to browse. Pick one, or pick a bunch.</div>
+      </div>
+
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 10, marginTop: 18 }}>
+        {['Fidelity', 'Charles Schwab', 'JP Morgan', 'Human Interest'].map(b => (
+          <div
+            key={b}
+            className="brokerage-card"
+            style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', textAlign: 'center', padding: 12, gap: 6 }}
+          >
+            <BrokerageLogo name={b} />
+            <div className="brokerage-name" style={{ fontSize: 14 }}>
+              {b}
             </div>
-            <div className="dropzone-title">Drop a CSV here</div>
-            <div className="dropzone-sub">Or click to browse. Read locally, never uploaded.</div>
-            <button
-              className="btn btn-primary"
-              style={{ marginTop: 18 }}
-              onClick={e => {
-                e.stopPropagation();
-                onAdvance();
-              }}
-            >
-              Use the sample · Fidelity Taxable
-            </button>
+            <div className="brokerage-note">Supported</div>
           </div>
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 10, marginTop: 18 }}>
-            {['Fidelity', 'Charles Schwab', 'JP Morgan', 'Human Interest'].map(b => (
-              <div
-                key={b}
-                className="brokerage-card"
-                style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', textAlign: 'center', padding: 12, gap: 6 }}
-              >
-                <BrokerageLogo name={b} />
-                <div className="brokerage-name" style={{ fontSize: 14 }}>
-                  {b}
-                </div>
-                <div className="brokerage-note">Supported</div>
-              </div>
-            ))}
-          </div>
-        </>
+        ))}
+      </div>
+
+      {errorMsg && (
+        <div
+          style={{
+            marginTop: 14,
+            padding: '10px 14px',
+            background: 'var(--paper-3)',
+            border: '1px solid var(--loss)',
+            color: 'var(--loss)',
+            borderRadius: 8,
+            fontSize: 12.5,
+          }}
+        >
+          {errorMsg}
+        </div>
       )}
 
-      {stage === 'review' && (
-        <div className="ob-review">
-          <div className="ob-review-detected">
-            <div style={{ fontFamily: 'var(--font-display)', fontSize: 22, color: 'var(--ink)' }}>
-              Fidelity, with 7 years of history.
-            </div>
-            <div className="muted" style={{ fontSize: 12.5, marginTop: 2 }}>
-              1,847 transactions parsed locally. Confirm what we figured out below.
-            </div>
+      {uploads.length > 0 && (
+        <div style={{ marginTop: 22 }}>
+          <div className="ob-step-eyebrow" style={{ marginBottom: 10 }}>
+            Ready to import · {uploads.length} account{uploads.length === 1 ? '' : 's'}
           </div>
-          <div className="ob-review-grid">
-            {[
-              { k: 'Brokerage', v: 'Fidelity' },
-              { k: 'Account type', v: 'Taxable brokerage' },
-              { k: 'Currency', v: 'USD' },
-              { k: 'Transactions', v: '1,847' },
-              { k: 'Holdings', v: '12 positions' },
-              { k: 'Date range', v: 'Jan 2019 to May 2026' },
-              { k: 'Action types', v: '7 mapped · 0 unknown' },
-            ].map(it => (
-              <div key={it.k} className="ob-review-item">
-                <div className="ob-review-key">{it.k}</div>
-                <div className="ob-review-val">{it.v}</div>
-              </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+            {uploads.map((u, i) => (
+              <UploadRow
+                key={i}
+                upload={u}
+                suggestNames={suggestNames}
+                onName={n => setUploadName(i, n)}
+                onType={t => setUploadType(i, t)}
+                onRemove={() => removeUpload(i)}
+              />
             ))}
-          </div>
-
-          <div className="ob-name-block">
-            <div className="ob-step-eyebrow" style={{ marginBottom: 10 }}>
-              Name this account
-            </div>
-            <input
-              type="text"
-              value={
-                nameMode === 'default' ? 'Fidelity Taxable' : nameMode === 'custom' ? customName : accountName
-              }
-              onChange={e => {
-                setNameMode('custom');
-                setCustomName(e.target.value);
-                setAccountName(e.target.value);
-              }}
-              placeholder="Type a name, or pick a suggestion below"
-              className="name-input"
-            />
-            <div
-              style={{
-                marginTop: 14,
-                fontFamily: 'var(--font-mono)',
-                fontSize: 10.5,
-                letterSpacing: '0.06em',
-                color: 'var(--ink-4)',
-              }}
-            >
-              Suggestions
-            </div>
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 8 }}>
-              {suggestNames.map(n => (
-                <button
-                  key={n}
-                  onClick={() => {
-                    setAccountName(n);
-                    setNameMode('fun');
-                  }}
-                  className={`name-suggest ${nameMode === 'fun' && accountName === n ? 'active' : ''}`}
-                >
-                  {n}
-                </button>
-              ))}
-              <button
-                onClick={() => {
-                  setNameMode('default');
-                  setAccountName('Fidelity Taxable');
-                }}
-                className={`name-suggest boring ${nameMode === 'default' ? 'active' : ''}`}
-              >
-                Just the boring one
-              </button>
-            </div>
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+function UploadRow({
+  upload,
+  suggestNames,
+  onName,
+  onType,
+  onRemove,
+}: {
+  upload: OnboardingUpload;
+  suggestNames: string[];
+  onName: (n: string) => void;
+  onType: (t: string) => void;
+  onRemove: () => void;
+}) {
+  const techName = defaultTechName(upload.brokerage, upload.accountType);
+  const isBoring = upload.accountName === techName;
+  return (
+    <div
+      style={{
+        background: 'var(--paper)',
+        border: '1px solid var(--line)',
+        borderRadius: 12,
+        padding: 14,
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 10,
+      }}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+        <BrokerageLogo name={upload.brokerage} />
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontSize: 14, color: 'var(--ink)', fontWeight: 500 }}>
+            {upload.brokerage} · {ACCOUNT_TYPE_LABEL[upload.accountType] || 'Brokerage'}
+          </div>
+          <div className="muted" style={{ fontSize: 11.5, fontFamily: 'var(--font-mono)', marginTop: 2 }}>
+            {upload.fileName} · {upload.transactions.length} transactions
+          </div>
+        </div>
+        <select
+          value={upload.accountType}
+          onChange={e => onType(e.target.value)}
+          style={{
+            fontSize: 12,
+            padding: '4px 8px',
+            border: '1px solid var(--line)',
+            borderRadius: 6,
+            background: 'var(--paper)',
+            color: 'var(--ink-2)',
+          }}
+        >
+          {Object.entries(ACCOUNT_TYPE_LABEL)
+            .filter(([k]) => k !== 'unknown')
+            .map(([k, v]) => (
+              <option key={k} value={k}>
+                {v}
+              </option>
+            ))}
+        </select>
+        <button
+          className="btn btn-ghost"
+          style={{ height: 28, padding: '0 10px', fontSize: 11.5, color: 'var(--ink-3)' }}
+          onClick={onRemove}
+        >
+          Remove
+        </button>
+      </div>
+
+      <input
+        type="text"
+        value={upload.accountName}
+        onChange={e => onName(e.target.value)}
+        placeholder="Account name"
+        className="name-input"
+      />
+
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+        {suggestNames.map(n => (
+          <button
+            key={n}
+            onClick={() => onName(n)}
+            className={`name-suggest ${upload.accountName === n ? 'active' : ''}`}
+          >
+            {n}
+          </button>
+        ))}
+        <button
+          onClick={() => onName(techName)}
+          className={`name-suggest boring ${isBoring ? 'active' : ''}`}
+        >
+          {techName}
+        </button>
+      </div>
     </div>
   );
 }
@@ -725,14 +869,23 @@ function AddAccountStep({
 function DoneStep({
   profile,
   goal,
-  accountName,
+  uploads,
   onEnter,
 }: {
   profile: Profile;
   goal: number;
-  accountName: string;
+  uploads: OnboardingUpload[];
   onEnter: () => void;
 }) {
+  const goalYear = 2026 + Math.max(1, profile.retireAge - (2026 - profile.birthYear));
+  const goalLabel =
+    goal >= 1_000_000 ? `$${(goal / 1_000_000).toFixed(goal >= 10_000_000 ? 0 : 1)}M` : `$${Math.round(goal / 1000)}K`;
+  const accountBlurb =
+    uploads.length === 0
+      ? 'No accounts yet. Add one from the sidebar whenever you are ready.'
+      : uploads.length === 1
+      ? `${uploads[0].accountName} is in your portfolio.`
+      : `${uploads.length} accounts are in your portfolio.`;
   return (
     <div className="ob-welcome">
       <div className="ob-welcome-glyph">
@@ -744,9 +897,9 @@ function DoneStep({
       <div className="ob-welcome-eyebrow">You're set</div>
       <h1 className="ob-welcome-title">Welcome, {profile.name || 'friend'}.</h1>
       <p className="ob-welcome-copy">
-        Your numbers are your own again. {accountName} is in your portfolio, your goal is{' '}
+        Your numbers are your own again. {accountBlurb} Your goal is{' '}
         <strong>
-          ${(goal / 1_000_000).toFixed(1)}M by {2026 + (profile.retireAge - (2026 - profile.birthYear))}
+          {goalLabel} by {goalYear}
         </strong>
         , and Matmon is ready when you are.
       </p>
