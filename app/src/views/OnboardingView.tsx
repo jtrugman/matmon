@@ -464,10 +464,30 @@ function GoalStep({
       </div>
 
       <div className="ob-goal">
-        <div className="ob-goal-big">
+        <div className="ob-goal-big" style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'center' }}>
           <span className="dollar">$</span>
-          {(goal / 1_000_000).toFixed(goal >= 10_000_000 ? 0 : 1)}
-          <span className="cents">M</span>
+          {/* The big number IS the input. Looks like a display until you click. */}
+          <input
+            type="text"
+            inputMode="numeric"
+            value={goalStr}
+            onChange={e => {
+              const cleaned = e.target.value.replace(/[^\d,]/g, '');
+              setGoalStr(cleaned);
+              const n = parseInt(cleaned.replace(/,/g, ''), 10);
+              if (!Number.isNaN(n) && n >= GOAL_MIN && n <= GOAL_MAX) {
+                setGoal(n);
+              }
+            }}
+            onBlur={e => {
+              const n = parseInt(e.target.value.replace(/,/g, ''), 10);
+              const clamped = Number.isNaN(n) ? goal : Math.max(GOAL_MIN, Math.min(GOAL_MAX, n));
+              setGoal(clamped);
+              setGoalStr(formatGoalInput(clamped));
+            }}
+            className="ob-goal-input"
+            aria-label="Goal in dollars"
+          />
         </div>
         <div className="ob-goal-tagline">{tagline}</div>
 
@@ -486,57 +506,6 @@ function GoalStep({
           <span>$5M</span>
           <span>$15M</span>
           <span>$25M</span>
-        </div>
-
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 10, marginTop: 14 }}>
-          <span className="muted" style={{ fontSize: 12, fontFamily: 'var(--font-mono)' }}>or type it:</span>
-          <span
-            style={{
-              display: 'inline-flex',
-              alignItems: 'center',
-              border: '1px solid var(--line)',
-              borderRadius: 8,
-              background: 'var(--paper)',
-              padding: '4px 10px',
-              gap: 2,
-              fontFamily: 'var(--font-mono)',
-              fontSize: 16,
-              color: 'var(--ink)',
-            }}
-          >
-            <span style={{ color: 'var(--ink-3)' }}>$</span>
-            <input
-              type="text"
-              inputMode="numeric"
-              value={goalStr}
-              onChange={e => {
-                // Allow digits + commas in display; strip commas when parsing.
-                const cleaned = e.target.value.replace(/[^\d,]/g, '');
-                setGoalStr(cleaned);
-                const n = parseInt(cleaned.replace(/,/g, ''), 10);
-                if (!Number.isNaN(n) && n >= GOAL_MIN && n <= GOAL_MAX) {
-                  setGoal(n);
-                }
-              }}
-              onBlur={e => {
-                const n = parseInt(e.target.value.replace(/,/g, ''), 10);
-                const clamped = Number.isNaN(n) ? goal : Math.max(GOAL_MIN, Math.min(GOAL_MAX, n));
-                setGoal(clamped);
-                setGoalStr(formatGoalInput(clamped));
-              }}
-              style={{
-                width: 140,
-                border: 'none',
-                outline: 'none',
-                background: 'transparent',
-                font: 'inherit',
-                fontVariantNumeric: 'tabular-nums',
-                color: 'inherit',
-                textAlign: 'left',
-              }}
-              aria-label="Goal in dollars"
-            />
-          </span>
         </div>
 
         <div className="ob-goal-meta">
@@ -636,6 +605,24 @@ function AddAccountStep({
           continue;
         }
         const brokerage = result.inferences.brokerage;
+
+        // Multi-account file (e.g. Fidelity multi-account export, JPM holdings
+        // with multiple accounts): split into one upload per detected account
+        // so the user names + types each individually.
+        if (result.accountsDetected && result.accountsDetected.length > 0) {
+          for (const acc of result.accountsDetected) {
+            const type = acc.accountTypeHint === 'unknown' ? 'taxable' : acc.accountTypeHint;
+            added.push({
+              fileName: `${file.name} · ${acc.name}`,
+              brokerage,
+              accountType: type,
+              accountName: `${brokerage} ${acc.name}`.trim(),
+              transactions: acc.transactions,
+            });
+          }
+          continue;
+        }
+
         const accountType = result.inferences.accountType === 'unknown' ? 'taxable' : result.inferences.accountType;
         added.push({
           fileName: file.name,
