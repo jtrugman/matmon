@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { isTauri } from '../lib/env';
 import { BrokerageLogo } from '../components/BrokerageLogo';
 
@@ -254,13 +254,26 @@ function ProfileStep({
   const set = (k: keyof Profile, v: any) => setProfile({ ...profile, [k]: v });
   const currentAge = 2026 - profile.birthYear;
 
-  function clampBirth(n: number) {
-    if (Number.isNaN(n)) return profile.birthYear;
-    return Math.max(1920, Math.min(2020, Math.floor(n)));
+  // Local string buffers so the user can type a partial value (e.g., "1" on
+  // the way to "1985") without the parent's clamp slamming it to the min on
+  // every keystroke. We only push valid in-range values up; on blur we clamp
+  // and snap back to display the canonical number.
+  const [birthStr, setBirthStr] = useState(String(profile.birthYear));
+  const [retireStr, setRetireStr] = useState(String(profile.retireAge));
+  useEffect(() => setBirthStr(String(profile.birthYear)), [profile.birthYear]);
+  useEffect(() => setRetireStr(String(profile.retireAge)), [profile.retireAge]);
+
+  function commitInRange(raw: string, lo: number, hi: number, key: 'birthYear' | 'retireAge') {
+    const n = parseInt(raw, 10);
+    if (!Number.isNaN(n) && n >= lo && n <= hi) set(key, n);
   }
-  function clampRetire(n: number) {
-    if (Number.isNaN(n)) return profile.retireAge;
-    return Math.max(40, Math.min(85, Math.floor(n)));
+
+  function clampAndSet(raw: string, lo: number, hi: number, key: 'birthYear' | 'retireAge'): number {
+    const n = parseInt(raw, 10);
+    if (Number.isNaN(n)) return profile[key];
+    const clamped = Math.max(lo, Math.min(hi, n));
+    set(key, clamped);
+    return clamped;
   }
 
   function pickTheme(t: 'light' | 'dark') {
@@ -296,18 +309,35 @@ function ProfileStep({
               When were you born? <span className="ob-field-hint">For planner defaults</span>
             </label>
             <div className="ob-stepper">
-              <button onClick={() => set('birthYear', clampBirth(profile.birthYear - 1))} aria-label="Decrease year">−</button>
+              <button
+                onClick={() => set('birthYear', Math.max(1920, profile.birthYear - 1))}
+                aria-label="Decrease year"
+              >
+                −
+              </button>
               <input
                 type="number"
                 inputMode="numeric"
-                value={profile.birthYear}
+                value={birthStr}
                 min={1920}
                 max={2020}
-                onChange={e => set('birthYear', clampBirth(Number(e.target.value)))}
+                onChange={e => {
+                  setBirthStr(e.target.value);
+                  commitInRange(e.target.value, 1920, 2020, 'birthYear');
+                }}
+                onBlur={e => {
+                  const v = clampAndSet(e.target.value, 1920, 2020, 'birthYear');
+                  setBirthStr(String(v));
+                }}
                 className="ob-stepper-input"
                 aria-label="Birth year"
               />
-              <button onClick={() => set('birthYear', clampBirth(profile.birthYear + 1))} aria-label="Increase year">+</button>
+              <button
+                onClick={() => set('birthYear', Math.min(2020, profile.birthYear + 1))}
+                aria-label="Increase year"
+              >
+                +
+              </button>
             </div>
             <div className="ob-field-aside">{currentAge} years old</div>
           </div>
@@ -315,18 +345,35 @@ function ProfileStep({
           <div className="ob-field">
             <label>When do you want to clock out?</label>
             <div className="ob-stepper">
-              <button onClick={() => set('retireAge', clampRetire(profile.retireAge - 1))} aria-label="Decrease retirement age">−</button>
+              <button
+                onClick={() => set('retireAge', Math.max(40, profile.retireAge - 1))}
+                aria-label="Decrease retirement age"
+              >
+                −
+              </button>
               <input
                 type="number"
                 inputMode="numeric"
-                value={profile.retireAge}
+                value={retireStr}
                 min={40}
                 max={85}
-                onChange={e => set('retireAge', clampRetire(Number(e.target.value)))}
+                onChange={e => {
+                  setRetireStr(e.target.value);
+                  commitInRange(e.target.value, 40, 85, 'retireAge');
+                }}
+                onBlur={e => {
+                  const v = clampAndSet(e.target.value, 40, 85, 'retireAge');
+                  setRetireStr(String(v));
+                }}
                 className="ob-stepper-input"
                 aria-label="Target retirement age"
               />
-              <button onClick={() => set('retireAge', clampRetire(profile.retireAge + 1))} aria-label="Increase retirement age">+</button>
+              <button
+                onClick={() => set('retireAge', Math.min(85, profile.retireAge + 1))}
+                aria-label="Increase retirement age"
+              >
+                +
+              </button>
             </div>
             <div className="ob-field-aside">{Math.max(0, profile.retireAge - currentAge)} years out</div>
           </div>
