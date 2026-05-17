@@ -1,0 +1,37 @@
+# --- Node / Vite ---
+node_modules/
+dist/
+dist-ssr/
+.vite/
+*.local
+coverage/
+.tsbuildinfo
+*.tsbuildinfo
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# --- Tauri / Rust ---
+# Compiled artifacts and IDE-ish state; do NOT ignore Cargo.lock (binary crate
+# — committing it pins exact dep versions for reproducible builds).
+src-tauri/target/
+src-tauri/gen/
+src-tauri/WixTools/
+
+# --- Local DB / quote cache ---
+# The Tauri build writes portfolio.db to the OS app-data dir, but if anyone
+# runs a one-off script that drops one alongside the source, keep it out.
+portfolio.db
+portfolio.db-journal
+portfolio.db-shm
+portfolio.db-wal
+*.sqlite
+*.sqlite-journal
+
+# --- Misc ---
+.DS_Store
+
+# Local brokerage exports (real data, may contain PII / account numbers).
+# Anonymized fixtures for the test suite live under
+# src/lib/importers/__fixtures__/ and ARE committed.
+example_csv/

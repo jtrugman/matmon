@@ -1,0 +1,11 @@
+Account name,Account number,Account type,Sub account,Description,Ticker,CUSIP,Quantity,Price,Value,Cost,Acquisition Date,Unit Cost,Acct Type
+"Self-Directed","XXXX1234","Brokerage","","APPLE INC","AAPL","037833100","10","195.40","1954.00","1800.00","02/05/2024","180.00","Brokerage"
+"Self-Directed","XXXX1234","Brokerage","","MICROSOFT CORP","MSFT","594918104","5","408.20","2041.00","2000.00","05/02/2024","400.00","Brokerage"
+"Self-Directed","XXXX1234","Brokerage","","VANGUARD S&P 500 ETF","VOO","922908363","8","475.50","3804.00","3600.00","04/18/2024","450.00","Brokerage"
+"Self-Directed","XXXX1234","Brokerage","","NVIDIA CORP","NVDA","67066G104","3","125.00","375.00","330.00","06/10/2024","110.00","Brokerage"
+"Self-Directed-Ret","XXXX5678","Brokerage","","VANGUARD TOTAL STOCK","VTI","922908769","20","250.00","5000.00","4800.00","01/15/2024","240.00","Brokerage"
+"Self-Directed-Ret","XXXX5678","Brokerage","","VANGUARD GROWTH ETF","VUG","922908736","2","365.20","730.40","700.00","05/03/2021","350.00","Brokerage"
+"Self-Directed-Ret","XXXX5678","Brokerage","","VANGUARD HIGH DIV YIELD ETF","VYM","921946794","4","128.20","512.80","500.00","03/27/2024","125.00","Brokerage"
+"Self-Directed-Ret","XXXX5678","Brokerage","","AMAZON COM INC","AMZN","023135106","6","185.50","1113.00","1050.00","07/12/2024","175.00","Brokerage"
+FOOTNOTES,,,,,,,,,,,,,
+A,"This security is held at average cost.",,,,,,,,,,,,
