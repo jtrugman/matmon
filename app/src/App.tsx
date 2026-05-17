@@ -5,8 +5,9 @@ import { MilestoneToast, type ToastMilestone } from './components/MilestoneToast
 import { TweaksPanel, TweakSection, TweakRadio, TweakButton } from './components/TweaksPanel';
 import { useTweaks } from './lib/useTweaks';
 import { usePortfolio } from './lib/usePortfolio';
-import { getSetting, saveGoalScenario, saveUserProfile, setSetting } from './lib/db/repos';
+import { getSetting, insertAccount, insertTransactions, saveGoalScenario, saveUserProfile, setSetting } from './lib/db/repos';
 import { requestDemoSeed } from './lib/db/seed';
+import type { OnboardingUpload } from './views/OnboardingView';
 import { HomeView } from './views/HomeView';
 import { AccountsView } from './views/AccountsView';
 import { HoldingsView } from './views/HoldingsView';
@@ -89,7 +90,11 @@ export function App() {
   }, [data]);
 
   const finishOnboarding = useCallback(
-    async (state?: { profile: { name: string; birthYear: number; retireAge: number; household: 'single' | 'partnered' | 'family'; theme: 'light' | 'dark' }; goal: number }) => {
+    async (state?: {
+      profile: { name: string; birthYear: number; retireAge: number; household: 'single' | 'partnered' | 'family'; theme: 'light' | 'dark' };
+      goal: number;
+      uploads?: OnboardingUpload[];
+    }) => {
       if (state) {
         try {
           await saveUserProfile(state.profile);
@@ -97,6 +102,30 @@ export function App() {
           if (state.profile.theme) setTweak('theme', state.profile.theme);
         } catch {
           // Persistence is best-effort; the user still lands in Matmon either way.
+        }
+        // Import any CSVs the user dropped in during step 3.
+        if (state.uploads && state.uploads.length > 0) {
+          for (const u of state.uploads) {
+            try {
+              const slug = u.accountName
+                .toLowerCase()
+                .replace(/[^a-z0-9]+/g, '-')
+                .replace(/(^-|-$)/g, '')
+                .slice(0, 32);
+              const id = `${slug}-${Date.now().toString(36)}-${Math.floor(Math.random() * 1e4).toString(36)}`;
+              await insertAccount({
+                id,
+                name: u.accountName,
+                brokerage: u.brokerage,
+                account_type: u.accountType,
+                currency: 'USD',
+                created_at: new Date().toISOString(),
+              });
+              await insertTransactions(id, u.transactions);
+            } catch {
+              /* one bad upload shouldn't kill the rest */
+            }
+          }
         }
       }
       // Persist the "I've seen onboarding" flag so we don't show it next launch.
