@@ -1702,6 +1702,33 @@ html.tauri .ob-shell .ob-rail-line {
   font-size: 36px;
   color: var(--ink-3);
 }
+/* The big number IS an input. Style it to look like the display until clicked. */
+.ob-goal-input {
+  font: inherit;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: inherit;
+  letter-spacing: inherit;
+  font-weight: inherit;
+  color: inherit;
+  background: transparent;
+  border: none;
+  outline: none;
+  width: 6ch;
+  text-align: left;
+  caret-color: var(--accent);
+  padding: 0;
+  /* Suppress number-input UI affordances */
+  -moz-appearance: textfield;
+}
+.ob-goal-input::-webkit-outer-spin-button,
+.ob-goal-input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+.ob-goal-input:focus {
+  outline: none;
+  background: var(--paper-3);
+  border-radius: 6px;
+  width: 10ch;
+}
 .ob-goal-tagline {
   font-family: var(--font-display);
   font-size: 18px;

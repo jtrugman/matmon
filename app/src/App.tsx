@@ -6,7 +6,7 @@ import { TweaksPanel, TweakSection, TweakRadio, TweakButton } from './components
 import { useTweaks } from './lib/useTweaks';
 import { usePortfolio } from './lib/usePortfolio';
 import { getSetting, insertAccount, insertTransactions, saveGoalScenario, saveUserProfile, setSetting } from './lib/db/repos';
-import { requestDemoSeed } from './lib/db/seed';
+import { clearDemoData, requestDemoSeed } from './lib/db/seed';
 import type { OnboardingUpload } from './views/OnboardingView';
 import { HomeView } from './views/HomeView';
 import { AccountsView } from './views/AccountsView';
@@ -105,6 +105,14 @@ export function App() {
         }
         // Import any CSVs the user dropped in during step 3.
         if (state.uploads && state.uploads.length > 0) {
+          // Wipe any lingering demo data so the user only sees their real
+          // accounts (handles users who clicked "Try with a sample portfolio"
+          // earlier or whose DB was pre-seeded by a previous build).
+          try {
+            await clearDemoData();
+          } catch {
+            /* best-effort */
+          }
           for (const u of state.uploads) {
             try {
               const slug = u.accountName
