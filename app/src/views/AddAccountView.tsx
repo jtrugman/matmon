@@ -3,8 +3,9 @@ import Papa from 'papaparse';
 import { PageHead } from '../components/PageHead';
 import { BrokerageLogo } from '../components/BrokerageLogo';
 import { importCsv, parseWithColumnMap, type ColumnMap } from '../lib/importers';
-import { insertAccount, insertTransactions } from '../lib/db/repos';
+import { insertAccount, insertTransactions, listAccounts } from '../lib/db/repos';
 import { leaveDemoMode } from '../lib/db/seed';
+import { slugifyAccountId } from '../lib/db/accountId';
 import type { DetectedAccount, ImporterResult, ParsedTransaction } from '../lib/importers/types';
 
 const COLUMN_MAP_STORAGE_KEY = 'matmon.columnMaps.v1';
@@ -238,14 +239,19 @@ export function AddAccountView({ prefillBrokerage }: { prefillBrokerage?: string
     let totalInserted = 0;
     let totalSkipped = 0;
     await leaveDemoMode();
+    // Snapshot existing IDs once; extend locally so multiple new accounts in
+    // this batch dedupe against each other too.
+    const existingIds: string[] = [];
+    try {
+      const existing = await listAccounts();
+      for (const row of existing) existingIds.push(row.id);
+    } catch {
+      /* worst case we just dedupe against [] */
+    }
     for (const acc of multiAccount.accounts) {
       const autoName = `${multiAccount.brokerage} ${acc.name}`.trim();
-      const slug = autoName
-        .toLowerCase()
-        .replace(/[^a-z0-9]+/g, '-')
-        .replace(/(^-|-$)/g, '')
-        .slice(0, 32);
-      const id = `${slug}-${acc.accountNumber || Date.now().toString(36)}`;
+      const id = slugifyAccountId(autoName, multiAccount.brokerage, existingIds);
+      existingIds.push(id);
       await insertAccount({
         id,
         name: autoName,
@@ -300,12 +306,14 @@ export function AddAccountView({ prefillBrokerage }: { prefillBrokerage?: string
   async function confirmImport() {
     if (!reviewing) return;
     setImportStatus('Saving…');
-    const slug = finalName
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, '-')
-      .replace(/(^-|-$)/g, '')
-      .slice(0, 32);
-    const id = `${slug}-${Date.now().toString(36)}`;
+    const existingIds: string[] = [];
+    try {
+      const existing = await listAccounts();
+      for (const row of existing) existingIds.push(row.id);
+    } catch {
+      /* worst case we just dedupe against [] */
+    }
+    const id = slugifyAccountId(finalName, reviewing.result.inferences.brokerage, existingIds);
     await leaveDemoMode();
     await insertAccount({
       id,

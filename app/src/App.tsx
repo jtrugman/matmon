@@ -5,8 +5,9 @@ import { MilestoneToast, type ToastMilestone } from './components/MilestoneToast
 import { TweaksPanel, TweakSection, TweakRadio, TweakButton } from './components/TweaksPanel';
 import { useTweaks } from './lib/useTweaks';
 import { usePortfolio } from './lib/usePortfolio';
-import { getSetting, insertAccount, insertTransactions, saveGoalScenario, saveUserProfile, setSetting } from './lib/db/repos';
+import { getSetting, insertAccount, insertTransactions, listAccounts, saveGoalScenario, saveUserProfile, setSetting } from './lib/db/repos';
 import { clearDemoData, requestDemoSeed } from './lib/db/seed';
+import { slugifyAccountId } from './lib/db/accountId';
 import type { OnboardingUpload } from './views/OnboardingView';
 import { HomeView } from './views/HomeView';
 import { AccountsView } from './views/AccountsView';
@@ -46,6 +47,12 @@ export function App() {
   // false = skip straight to the app.
   const [onboarding, setOnboarding] = useState<boolean | null>(null);
   const [selectedHolding, setSelectedHolding] = useState<string | null>(null);
+  const [selectedAccount, setSelectedAccount] = useState<string | null>(null);
+
+  const openAccount = useCallback((accountId: string) => {
+    setSelectedAccount(accountId);
+    setView('account-detail');
+  }, []);
 
   // On first mount, ask the DB whether the user has ever completed onboarding.
   // Real users land in onboarding by default; the Tweaks "Restart onboarding"
@@ -113,14 +120,19 @@ export function App() {
           } catch {
             /* best-effort */
           }
+          // Snapshot of IDs already in the DB; we extend it locally as we go so
+          // multiple uploads with the same name dedupe within this batch too.
+          const existingIds: string[] = [];
+          try {
+            const existing = await listAccounts();
+            for (const row of existing) existingIds.push(row.id);
+          } catch {
+            /* listAccounts is best-effort; worst case we just dedupe against [] */
+          }
           for (const u of state.uploads) {
             try {
-              const slug = u.accountName
-                .toLowerCase()
-                .replace(/[^a-z0-9]+/g, '-')
-                .replace(/(^-|-$)/g, '')
-                .slice(0, 32);
-              const id = `${slug}-${Date.now().toString(36)}-${Math.floor(Math.random() * 1e4).toString(36)}`;
+              const id = slugifyAccountId(u.accountName, u.brokerage, existingIds);
+              existingIds.push(id);
               await insertAccount({
                 id,
                 name: u.accountName,
@@ -208,9 +220,18 @@ export function App() {
           />
         );
       case 'buckets':
-        return <AccountsView data={data} onAddAccount={goAddAccount} />;
+        return <AccountsView data={data} onAddAccount={goAddAccount} onOpenAccount={openAccount} />;
       case 'holdings':
         return <HoldingsView data={data} onSelect={openHolding} />;
+      case 'account-detail':
+        return (
+          <HoldingsView
+            data={data}
+            onSelect={openHolding}
+            filterAccountId={selectedAccount ?? undefined}
+            onBack={() => setView('buckets')}
+          />
+        );
       case 'holding-detail': {
         const h = data.holdings.find(x => x.sym === selectedHolding) || data.holdings[0];
         return <HoldingDetailView data={data} holding={h} onBack={() => setView('holdings')} />;
