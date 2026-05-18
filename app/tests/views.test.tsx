@@ -29,6 +29,8 @@ describe('Views render', () => {
     // 4 distinct brokerages in demo: Fidelity, JP Morgan, Vanguard, Schwab
     expect(screen.getByText('Fidelity')).toBeInTheDocument();
     expect(screen.getByText('Schwab')).toBeInTheDocument();
+    // Internal account IDs (e.g. "fid-tax") should NOT leak into the rendered UI.
+    expect(screen.queryByText(/fid-tax/i)).not.toBeInTheDocument();
   });
 
   it('Holdings table renders one row per holding', () => {

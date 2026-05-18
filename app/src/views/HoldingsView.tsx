@@ -7,21 +7,39 @@ import type { Holding, MatmonData } from '../data';
 type Props = {
   data: MatmonData;
   onSelect?: (sym: string) => void;
+  /** If set, only show holdings belonging to this account id. */
+  filterAccountId?: string;
+  /** Click handler for the "← Accounts" back link. Only rendered when set. */
+  onBack?: () => void;
 };
 
-export function HoldingsView({ data, onSelect }: Props) {
+export function HoldingsView({ data, onSelect, filterAccountId, onBack }: Props) {
   const [sortKey, setSortKey] = useState<keyof Holding>('value');
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
 
+  const filteredAccount = filterAccountId
+    ? data.accounts.find(a => a.id === filterAccountId) || null
+    : null;
+
+  const scopedHoldings = useMemo(
+    () => (filterAccountId ? data.holdings.filter(h => h.account === filterAccountId) : data.holdings),
+    [data.holdings, filterAccountId],
+  );
+
+  const scopedValue = useMemo(
+    () => scopedHoldings.reduce((s, h) => s + h.value, 0),
+    [scopedHoldings],
+  );
+
   const sorted = useMemo(() => {
-    const out = [...data.holdings].sort((a, b) => {
+    const out = [...scopedHoldings].sort((a, b) => {
       const av = a[sortKey];
       const bv = b[sortKey];
       const r = typeof av === 'string' ? (av as string).localeCompare(bv as string) : (av as number) - (bv as number);
       return sortDir === 'asc' ? r : -r;
     });
     return out;
-  }, [data, sortKey, sortDir]);
+  }, [scopedHoldings, sortKey, sortDir]);
 
   function sortBy(k: keyof Holding) {
     if (sortKey === k) setSortDir(sortDir === 'asc' ? 'desc' : 'asc');
@@ -32,14 +50,27 @@ export function HoldingsView({ data, onSelect }: Props) {
   }
   const arrow = (k: keyof Holding) => (sortKey === k ? (sortDir === 'asc' ? '↑' : '↓') : '');
 
+  const isFiltered = Boolean(filterAccountId);
+  const titleText = filteredAccount ? filteredAccount.name : 'Holdings';
+  const eyebrow = filteredAccount ? `${filteredAccount.brokerage} · account holdings` : null;
+
   return (
     <div>
+      {onBack && (
+        <button className="back-btn" onClick={onBack}>
+          ← Accounts
+        </button>
+      )}
       <PageHead
-        title="Holdings"
+        title={titleText}
         meta={
           <div>
+            {eyebrow && (
+              <div style={{ color: 'var(--ink-4)', marginBottom: 2 }}>{eyebrow}</div>
+            )}
             <div>
-              {data.holdings.length} positions · {fmtMoney(data.totalValue)}
+              {scopedHoldings.length} positions ·{' '}
+              {fmtMoney(isFiltered ? scopedValue : data.totalValue)}
             </div>
             <div style={{ marginTop: 2, color: 'var(--ink-4)' }}>Average-cost basis</div>
           </div>

@@ -7,9 +7,10 @@ import type { MatmonData, Account } from '../data';
 type Props = {
   data: MatmonData;
   onAddAccount?: (brokerage?: string) => void;
+  onOpenAccount?: (accountId: string) => void;
 };
 
-export function AccountsView({ data, onAddAccount }: Props) {
+export function AccountsView({ data, onAddAccount, onOpenAccount }: Props) {
   const tax = getTaxConstants();
   const contributionPanels = [
     {
@@ -102,9 +103,7 @@ export function AccountsView({ data, onAddAccount }: Props) {
                     <div className="bar-type-pip" style={{ background: t.color }} />
                     <div>
                       <div className="bar-name">{a.name}</div>
-                      <div className="bar-meta">
-                        {t.label} · {a.id}
-                      </div>
+                      <div className="bar-meta">{t.label}</div>
                     </div>
                     <div className="bar-value">
                       <div className="num" style={{ fontSize: 15, color: 'var(--ink)' }}>
@@ -122,7 +121,13 @@ export function AccountsView({ data, onAddAccount }: Props) {
                       </div>
                     </div>
                     <div className="bar-share">{((a.value / g.total) * 100).toFixed(1)}%</div>
-                    <button className="bar-open">Open →</button>
+                    <button
+                      className="bar-open"
+                      onClick={() => onOpenAccount?.(a.id)}
+                      aria-label={`Open ${a.name}`}
+                    >
+                      Open →
+                    </button>
                   </div>
                 );
               })}
