@@ -1,0 +1,35 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Capabilities for the Matmon desktop window. Only the surface area the app actually uses is exposed.",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    {
+      "identifier": "sql:default",
+      "allow": [
+        { "name": "sqlite:portfolio.db" }
+      ]
+    },
+    "sql:allow-execute",
+    "sql:allow-select",
+    "sql:allow-load",
+    "fs:default",
+    "fs:allow-read-text-file",
+    "dialog:default",
+    "dialog:allow-open",
+    "dialog:allow-save",
+    "notification:default",
+    "notification:allow-notify",
+    "http:default",
+    {
+      "identifier": "http:allow-fetch",
+      "allow": [
+        { "url": "https://query1.finance.yahoo.com/*" },
+        { "url": "https://query2.finance.yahoo.com/*" },
+        { "url": "https://www.alphavantage.co/*" },
+        { "url": "https://finnhub.io/*" }
+      ]
+    }
+  ]
+}
