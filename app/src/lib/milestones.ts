@@ -19,6 +19,7 @@
 
 import { listAccounts, listAchievements, listTransactions, unlockAchievement } from './db/repos';
 import type { Holding } from '../data';
+import { WATCHED_MILESTONE_KEYS } from './milestoneCatalog';
 
 /** Shape the milestone checks read from. Built by `collectPortfolioState`. */
 export interface PortfolioState {
@@ -50,7 +51,11 @@ const yearsBetween = (older: Date, newer: Date): number => {
   return ms / (1000 * 60 * 60 * 24 * 365.25);
 };
 
-export const MILESTONE_DEFS: MilestoneDef[] = [
+// All detectable milestones. Keys MUST appear in `WATCHED_MILESTONE_KEYS` from
+// `milestoneCatalog.ts` — the catalog is the source of truth; the entries here
+// just bind each watched key to its trigger function. A constructor-time guard
+// at the bottom of this file blows up loudly if the two ever drift.
+const ALL_DEFS: MilestoneDef[] = [
   // Portfolio value thresholds (PRD §10)
   { key: 'first_1k',            check: valueAtLeast(1_000) },
   { key: 'first_10k',           check: valueAtLeast(10_000) },
@@ -96,6 +101,23 @@ export const MILESTONE_DEFS: MilestoneDef[] = [
     check: s => (s.oldestTransactionDate ? yearsBetween(s.oldestTransactionDate, s.now) >= 5 : false),
   },
 ];
+
+// Only include defs whose key is in the catalog's watched set. This guarantees
+// the watcher never fires for a milestone the UI doesn't know how to render.
+export const MILESTONE_DEFS: MilestoneDef[] = ALL_DEFS.filter(d => WATCHED_MILESTONE_KEYS.has(d.key));
+
+// Dev-time sanity check: every watched key in the catalog should have a def here.
+// If someone adds a new key to `WATCHED_MILESTONE_KEYS` without wiring a trigger,
+// fail fast at module load so we don't ship a silently-broken milestone.
+{
+  const defined = new Set(MILESTONE_DEFS.map(d => d.key));
+  const missing = Array.from(WATCHED_MILESTONE_KEYS).filter(k => !defined.has(k));
+  if (missing.length) {
+    throw new Error(
+      `[milestones] WATCHED_MILESTONE_KEYS includes keys with no trigger: ${missing.join(', ')}`,
+    );
+  }
+}
 
 /** Pure function the tests pin against. Returns keys whose `check` is now true and aren't already unlocked. */
 export function detectNewUnlocks(state: PortfolioState, alreadyUnlocked: Set<string>): string[] {

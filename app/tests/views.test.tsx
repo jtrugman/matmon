@@ -1,10 +1,11 @@
 // Lightweight component smoke tests. The big invariants are covered by unit tests;
 // these just confirm the views mount without crashing and surface key UI affordances.
 
-import { describe, expect, it } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { describe, expect, it, vi, beforeEach } from 'vitest';
+import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MATMON_DATA } from '../src/data';
+import * as repos from '../src/lib/db/repos';
 import { HomeView } from '../src/views/HomeView';
 import { AccountsView } from '../src/views/AccountsView';
 import { HoldingsView } from '../src/views/HoldingsView';
@@ -53,11 +54,33 @@ describe('Views render', () => {
     expect(screen.getByText(/Goal · target balance/i)).toBeInTheDocument();
   });
 
-  it('Achievements shows the just-unlocked hero', () => {
-    render(<AchievementsView data={MATMON_DATA} onReplayToast={() => {}} />);
-    expect(screen.getByText(/Just unlocked/i)).toBeInTheDocument();
-    // "A millionaire" appears in the hero card and in the collection grid — both are valid.
-    expect(screen.getAllByText('A millionaire').length).toBeGreaterThanOrEqual(1);
+  describe('Achievements', () => {
+    beforeEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    it('shows the empty state when the user has zero unlocks', async () => {
+      vi.spyOn(repos, 'listAchievements').mockResolvedValue([]);
+      render(<AchievementsView data={MATMON_DATA} onReplayToast={() => {}} />);
+      await waitFor(() => {
+        expect(screen.getByText(/right around the corner/i)).toBeInTheDocument();
+      });
+      // Empty state should suppress the trail / hero / coming-up sections.
+      expect(screen.queryByText(/Just unlocked/i)).not.toBeInTheDocument();
+      expect(screen.queryByText(/Coming up next/i)).not.toBeInTheDocument();
+    });
+
+    it('shows the just-unlocked hero when a milestone unlocked today', async () => {
+      vi.spyOn(repos, 'listAchievements').mockResolvedValue([
+        { milestone_key: 'first_100k', unlocked_at: new Date().toISOString() },
+      ]);
+      render(<AchievementsView data={MATMON_DATA} onReplayToast={() => {}} />);
+      await waitFor(() => {
+        expect(screen.getByText(/Just unlocked/i)).toBeInTheDocument();
+      });
+      // The hero title for first_100k should be on the page.
+      expect(screen.getAllByText(/Six digits/i).length).toBeGreaterThanOrEqual(1);
+    });
   });
 
   it('Transactions view has search + filter controls', () => {

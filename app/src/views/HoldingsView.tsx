@@ -42,13 +42,14 @@ export function HoldingsView({ data, onSelect, filterAccountId, onBack }: Props)
   }, [scopedHoldings, sortKey, sortDir]);
 
   function sortBy(k: keyof Holding) {
-    if (sortKey === k) setSortDir(sortDir === 'asc' ? 'desc' : 'asc');
-    else {
+    if (sortKey === k) {
+      setSortDir(prev => (prev === 'asc' ? 'desc' : 'asc'));
+    } else {
       setSortKey(k);
       setSortDir('desc');
     }
   }
-  const arrow = (k: keyof Holding) => (sortKey === k ? (sortDir === 'asc' ? '↑' : '↓') : '');
+  const arrow = (k: keyof Holding) => (sortKey === k ? (sortDir === 'asc' ? ' ↑' : ' ↓') : '');
 
   const isFiltered = Boolean(filterAccountId);
   const titleText = filteredAccount ? filteredAccount.name : 'Holdings';
@@ -88,28 +89,28 @@ export function HoldingsView({ data, onSelect, filterAccountId, onBack }: Props)
           <thead>
             <tr>
               <th onClick={() => sortBy('sym')} style={{ cursor: 'pointer' }}>
-                Symbol {arrow('sym')}
+                Symbol{arrow('sym')}
               </th>
               <th onClick={() => sortBy('sector')} style={{ cursor: 'pointer' }}>
-                Sector
+                Sector{arrow('sector')}
               </th>
               <th className="r" onClick={() => sortBy('qty')} style={{ cursor: 'pointer' }}>
-                Qty {arrow('qty')}
+                Qty{arrow('qty')}
               </th>
               <th className="r" onClick={() => sortBy('price')} style={{ cursor: 'pointer' }}>
-                Price {arrow('price')}
+                Price{arrow('price')}
               </th>
               <th className="r" onClick={() => sortBy('cost')} style={{ cursor: 'pointer' }}>
-                Cost basis {arrow('cost')}
+                Cost basis{arrow('cost')}
               </th>
               <th className="r" onClick={() => sortBy('value')} style={{ cursor: 'pointer' }}>
-                Value {arrow('value')}
+                Value{arrow('value')}
               </th>
               <th className="r" onClick={() => sortBy('gain')} style={{ cursor: 'pointer' }}>
-                Gain {arrow('gain')}
+                Gain{arrow('gain')}
               </th>
               <th className="r" onClick={() => sortBy('share')} style={{ cursor: 'pointer' }}>
-                %
+                %{arrow('share')}
               </th>
               <th className="c">30D</th>
             </tr>

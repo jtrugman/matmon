@@ -12,6 +12,8 @@
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build --bundles app && npm run bundle:dmg",
     "tauri:icon": "tauri icon",
+    "icons:rebuild": "bash scripts/regen-icons.sh",
+    "dev:fresh": "cd src-tauri && cargo clean && cd .. && npm run tauri:dev",
     "bundle:dmg": "node scripts/bundle-dmg.mjs",
     "test": "vitest run",
     "test:watch": "vitest",
