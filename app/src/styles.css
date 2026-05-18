@@ -1391,12 +1391,18 @@ html.tauri .ob-shell .ob-rail-line {
   padding: 22px 80px 14px;
   position: relative;
   flex-shrink: 0;
+  /* Used by .ob-rail-line below to anchor its endpoints to the first/last
+     dot centers. With 5 evenly-spaced flex items inside the padded rail,
+     the first dot center is at left-padding + innerWidth / (2 * N),
+     and the last is the symmetric distance from the right edge. */
+  --rail-pad: 80px;
+  --rail-steps: 5;
 }
 .ob-rail-line {
   position: absolute;
   top: 34px;
-  left: 100px;
-  right: 100px;
+  left: calc(var(--rail-pad) + (100% - 2 * var(--rail-pad)) / var(--rail-steps) / 2);
+  right: calc(var(--rail-pad) + (100% - 2 * var(--rail-pad)) / var(--rail-steps) / 2);
   height: 2px;
   background: var(--paper-3);
   border-radius: 1px;
@@ -1702,7 +1708,8 @@ html.tauri .ob-shell .ob-rail-line {
   font-size: 36px;
   color: var(--ink-3);
 }
-/* The big number IS an input. Style it to look like the display until clicked. */
+/* The big number swaps in this input when you click it. Width is sized for
+   the longest valid value ("25,000,000" = 10 chars), no layout shift. */
 .ob-goal-input {
   font: inherit;
   font-family: var(--font-mono);
@@ -1711,24 +1718,19 @@ html.tauri .ob-shell .ob-rail-line {
   letter-spacing: inherit;
   font-weight: inherit;
   color: inherit;
-  background: transparent;
+  background: var(--paper-3);
   border: none;
   outline: none;
-  width: 6ch;
-  text-align: left;
+  width: 11ch;
+  text-align: center;
   caret-color: var(--accent);
-  padding: 0;
+  padding: 2px 8px;
+  border-radius: 8px;
   /* Suppress number-input UI affordances */
   -moz-appearance: textfield;
 }
 .ob-goal-input::-webkit-outer-spin-button,
 .ob-goal-input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
-.ob-goal-input:focus {
-  outline: none;
-  background: var(--paper-3);
-  border-radius: 6px;
-  width: 10ch;
-}
 .ob-goal-tagline {
   font-family: var(--font-display);
   font-size: 18px;
