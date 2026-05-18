@@ -52,4 +52,16 @@ describe('Onboarding multi-account ingestion', () => {
     expect(r.importerId).toBe('fidelity');
     expect(r.accountsDetected).toBeUndefined();
   });
+
+  it('detected accounts carry their account numbers for canonical naming', () => {
+    const r = importCsv(FIDELITY_MULTI);
+    const individual = r.accountsDetected!.find(a => a.name === 'Individual')!;
+    expect(individual.accountNumber).toBe('XXXX0001');
+    const hsa = r.accountsDetected!.find(a => a.name === 'Health Savings Account')!;
+    expect(hsa.accountNumber).toBe('XXXX0002');
+    // Last-4 helper logic (used by canonicalName in OnboardingView).
+    const last4 = (s: string) => s.replace(/\D/g, '').slice(-4);
+    expect(last4(individual.accountNumber)).toBe('0001');
+    expect(last4(hsa.accountNumber)).toBe('0002');
+  });
 });

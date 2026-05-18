@@ -60,8 +60,34 @@ export type OnboardingUpload = {
   brokerage: string;
   accountType: string;
   accountName: string;
+  /** Brokerage-assigned account number (raw — may be masked like "XXXX1234"). */
+  accountNumber?: string;
+  /** Original detected account name from the multi-account file ("Individual",
+   *  "Self-Directed-Ret", etc.). Used as the third token in the canonical
+   *  "<last4> <brokerage> <name>" auto-name. */
+  detectedName?: string;
   transactions: ParsedTransaction[];
 };
+
+/** Pull the trailing 4-digit window from a brokerage account number that may
+ *  be presented as "...2180", "XXXX-1234", or a plain integer. */
+function lastFour(accountNumber?: string): string {
+  if (!accountNumber) return '';
+  const digits = accountNumber.replace(/\D/g, '');
+  return digits.slice(-4);
+}
+
+/** Canonical account name used by suggestion pills and the auto-fill default.
+ *  For multi-account uploads we have the brokerage + detected account name +
+ *  account number, so we build "1234 JP Morgan Self-Directed-Ret". For
+ *  single-account files we fall back to "<Brokerage> <Type label>". */
+function canonicalName(u: OnboardingUpload): string {
+  const last4 = lastFour(u.accountNumber);
+  if (u.detectedName) {
+    return [last4, u.brokerage, u.detectedName].filter(Boolean).join(' ');
+  }
+  return defaultTechName(u.brokerage, u.accountType);
+}
 
 type Props = {
   onComplete: (state?: { profile: Profile; goal: number; uploads?: OnboardingUpload[] }) => void;
@@ -661,13 +687,17 @@ function AddAccountStep({
         if (result.accountsDetected && result.accountsDetected.length > 0) {
           for (const acc of result.accountsDetected) {
             const type = acc.accountTypeHint === 'unknown' ? 'taxable' : acc.accountTypeHint;
-            added.push({
+            const draft: OnboardingUpload = {
               fileName: `${file.name} · ${acc.name}`,
               brokerage,
               accountType: type,
-              accountName: `${brokerage} ${acc.name}`.trim(),
+              accountName: '', // filled in via canonicalName below
+              accountNumber: acc.accountNumber,
+              detectedName: acc.name,
               transactions: acc.transactions,
-            });
+            };
+            draft.accountName = canonicalName(draft);
+            added.push(draft);
           }
           continue;
         }
@@ -700,9 +730,11 @@ function AddAccountStep({
   }
   function setUploadType(i: number, type: string) {
     setUploads(
-      uploads.map((u, idx) =>
-        idx === i ? { ...u, accountType: type, accountName: defaultTechName(u.brokerage, type) } : u,
-      ),
+      uploads.map((u, idx) => {
+        if (idx !== i) return u;
+        const updated = { ...u, accountType: type };
+        return { ...updated, accountName: canonicalName(updated) };
+      }),
     );
   }
 
@@ -820,7 +852,10 @@ function UploadRow({
   onType: (t: string) => void;
   onRemove: () => void;
 }) {
-  const techName = defaultTechName(upload.brokerage, upload.accountType);
+  // For multi-account uploads we have a detected name + number, so the boring
+  // suggestion is "1234 Brokerage DetectedName". For single-account uploads
+  // we fall back to "Brokerage TypeLabel" since no account number is known.
+  const techName = canonicalName(upload);
   const isBoring = upload.accountName === techName;
   return (
     <div
