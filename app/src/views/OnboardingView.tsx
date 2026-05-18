@@ -446,10 +446,23 @@ function GoalStep({
       ? 'Pillar-of-the-community territory'
       : 'Generational money';
 
-  // Local string buffer for the typeable goal field, same pattern as the
-  // birth-year / retire-age inputs above. Sync down on slider movement.
+  // Click-to-edit: the big "$X.XM" reads as a display until the user clicks
+  // it. Then it swaps to a focused input showing long-form digits; on blur
+  // we snap back to the clean display so the layout never jumps.
+  const [editing, setEditing] = useState(false);
   const [goalStr, setGoalStr] = useState(formatGoalInput(goal));
+  const goalInputRef = useRef<HTMLInputElement>(null);
   useEffect(() => setGoalStr(formatGoalInput(goal)), [goal]);
+  useEffect(() => {
+    if (editing) goalInputRef.current?.select();
+  }, [editing]);
+
+  function commitGoalFromString(raw: string) {
+    const n = parseInt(raw.replace(/,/g, ''), 10);
+    const clamped = Number.isNaN(n) ? goal : Math.max(GOAL_MIN, Math.min(GOAL_MAX, n));
+    setGoal(clamped);
+    setGoalStr(formatGoalInput(clamped));
+  }
 
   return (
     <div className="ob-step">
@@ -464,32 +477,68 @@ function GoalStep({
       </div>
 
       <div className="ob-goal">
-        <div className="ob-goal-big" style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'center' }}>
-          <span className="dollar">$</span>
-          {/* The big number IS the input. Looks like a display until you click. */}
-          <input
-            type="text"
-            inputMode="numeric"
-            value={goalStr}
-            onChange={e => {
-              const cleaned = e.target.value.replace(/[^\d,]/g, '');
-              setGoalStr(cleaned);
-              const n = parseInt(cleaned.replace(/,/g, ''), 10);
-              if (!Number.isNaN(n) && n >= GOAL_MIN && n <= GOAL_MAX) {
-                setGoal(n);
-              }
-            }}
-            onBlur={e => {
-              const n = parseInt(e.target.value.replace(/,/g, ''), 10);
-              const clamped = Number.isNaN(n) ? goal : Math.max(GOAL_MIN, Math.min(GOAL_MAX, n));
-              setGoal(clamped);
-              setGoalStr(formatGoalInput(clamped));
-            }}
-            className="ob-goal-input"
-            aria-label="Goal in dollars"
-          />
+        <div
+          className="ob-goal-big"
+          onClick={() => !editing && setEditing(true)}
+          style={{ cursor: editing ? 'text' : 'pointer' }}
+          title={editing ? undefined : 'Click to type an exact amount'}
+        >
+          {editing ? (
+            <>
+              <span className="dollar">$</span>
+              <input
+                ref={goalInputRef}
+                type="text"
+                inputMode="numeric"
+                value={goalStr}
+                onChange={e => {
+                  const cleaned = e.target.value.replace(/[^\d,]/g, '');
+                  setGoalStr(cleaned);
+                  const n = parseInt(cleaned.replace(/,/g, ''), 10);
+                  if (!Number.isNaN(n) && n >= GOAL_MIN && n <= GOAL_MAX) {
+                    setGoal(n);
+                  }
+                }}
+                onBlur={e => {
+                  commitGoalFromString(e.target.value);
+                  setEditing(false);
+                }}
+                onKeyDown={e => {
+                  if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
+                  if (e.key === 'Escape') {
+                    setGoalStr(formatGoalInput(goal));
+                    setEditing(false);
+                  }
+                }}
+                className="ob-goal-input"
+                aria-label="Goal in dollars"
+              />
+            </>
+          ) : (
+            <>
+              <span className="dollar">$</span>
+              {(goal / 1_000_000).toFixed(goal >= 10_000_000 ? 0 : 1)}
+              <span className="cents">M</span>
+            </>
+          )}
         </div>
-        <div className="ob-goal-tagline">{tagline}</div>
+        <div className="ob-goal-tagline">
+          {tagline}
+          {!editing && (
+            <span
+              style={{
+                marginLeft: 8,
+                fontFamily: 'var(--font-mono)',
+                fontSize: 11,
+                color: 'var(--ink-4)',
+                letterSpacing: '0.04em',
+                textTransform: 'uppercase',
+              }}
+            >
+              · click to type
+            </span>
+          )}
+        </div>
 
         <input
           type="range"
