@@ -45,6 +45,49 @@ Produces `.dmg` on macOS, `.msi` + `.exe` on Windows, `.AppImage` + `.deb` on Li
 
 The bundle icon set in `src-tauri/icons/` is a generated placeholder. Replace `src-tauri/icons/source.png` with your own 1024×1024 PNG and run `npm run tauri:icon icons/source.png` to regenerate all sizes.
 
+## Updating the app icon
+
+The Dock and Finder render the macOS app icon from `src-tauri/icons/icon.icns`, which gets copied into `Matmon.app/Contents/Resources/` during the Tauri bundle step. Two things commonly trip people up:
+
+1. `tauri dev` rebuilds the Rust binary but does **not** always regenerate the `.app` bundle layout, so an old `icon.icns` from a previous build can keep showing up in the Dock.
+2. `tauri icon` shells out to Pillow, whose `.icns` writer produces a non-standard file that macOS sometimes silently falls back from to the generic doc icon.
+
+The fix is to (a) regenerate icons with macOS's native `sips` + `iconutil`, which produce a real Apple-format `.icns`, and (b) force Tauri to rebuild the bundle so the new icon actually lands in `Matmon.app`.
+
+### Standard refresh
+
+```bash
+# 1. Drop your new 1024x1024 source PNG at src-tauri/icons/source.png, then:
+cd app
+npm run icons:rebuild
+
+# 2. Quit any running Tauri dev window (Cmd+Q in the app), then:
+npm run tauri:dev
+```
+
+`icons:rebuild` writes `icon.icns` (via `iconutil`), `icon.png`, `32x32.png`, `128x128.png`, `128x128@2x.png`, and `icon.ico` (via `sips`) from the same source. The script lives at `scripts/regen-icons.sh`.
+
+### If the icon still looks stale after rebuilding
+
+That means the macOS icon services cache (keyed by bundle id `app.matmon.desktop`) is holding onto the old image. Wipe it and restart the Dock and Finder:
+
+```bash
+sudo rm -rfv /Library/Caches/com.apple.iconservices.store
+sudo find /private/var/folders/ \( -name com.apple.dock.iconcache -or -name com.apple.iconservices \) -exec rm -rfv {} \;
+killall Dock
+killall Finder
+```
+
+### Nuclear option: 100%-clean rebuild
+
+If you suspect cargo is reusing a stale build artifact, run:
+
+```bash
+npm run dev:fresh
+```
+
+That runs `cargo clean` inside `src-tauri/` and then `npm run tauri:dev`, which forces Tauri to rebuild the Rust binary **and** the `.app` bundle from scratch. Slow (a few minutes) but guaranteed clean.
+
 ## What's wired up
 
 | Area | Status |

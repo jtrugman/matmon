@@ -1,24 +1,49 @@
+import { useEffect, useState } from 'react';
 import { PageHead } from '../components/PageHead';
 import type { MatmonData } from '../data';
+import { MILESTONE_CATALOG, type MilestoneCatalogEntry } from '../lib/milestoneCatalog';
+import { listAchievements } from '../lib/db/repos';
 
-type JourneyItem = {
-  key: string;
-  glyph: string;
-  title: string;
-  copy: string;
-  date: Date;
+/** A row from the DB, normalized for the view. */
+type UnlockRow = { key: string; date: Date };
+
+/** A catalog entry joined with its DB state. */
+type JoinedMilestone = MilestoneCatalogEntry & {
   unlocked: boolean;
-  fresh?: boolean;
-  progress?: number;
-  context?: string;
-  secret?: boolean;
+  /** Unlock date from the DB, null if still locked. */
+  date: Date | null;
+  /** True if unlocked within the last 24 hours. */
+  fresh: boolean;
 };
 
-function AchievementsTrail({ journey }: { journey: JourneyItem[] }) {
-  const today = new Date(2026, 4, 17);
-  const start = journey[0].date;
-  const end = new Date(today.getFullYear() + 8, 0, 1);
-  const span = end.getTime() - start.getTime();
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Joins the catalog with the per-user unlock rows. Returns the catalog in its
+ * declared order with `unlocked`, `date`, and `fresh` filled in.
+ */
+function joinCatalogWithUnlocks(unlocks: UnlockRow[], now: Date): JoinedMilestone[] {
+  const byKey = new Map(unlocks.map(u => [u.key, u]));
+  return MILESTONE_CATALOG.map(entry => {
+    const row = byKey.get(entry.key);
+    const date = row?.date ?? null;
+    const fresh = date != null && now.getTime() - date.getTime() < DAY_MS;
+    return { ...entry, unlocked: !!row, date, fresh };
+  });
+}
+
+/** Horizontal trail showing only milestones the user has actually unlocked, plotted by date. */
+function AchievementsTrail({ unlocked, now }: { unlocked: JoinedMilestone[]; now: Date }) {
+  // Sort oldest -> newest so the leftmost dot is the earliest unlock.
+  const sorted = [...unlocked].sort((a, b) => (a.date!.getTime() - b.date!.getTime()));
+  const start = sorted[0].date!;
+  // End the trail just past today so the "TODAY" tick lives on the right edge.
+  const end = new Date(Math.max(now.getTime(), sorted[sorted.length - 1].date!.getTime()));
+  // Pad the span by 30 days on each side so the first/last dots don't kiss the edge.
+  const padMs = 30 * DAY_MS;
+  const spanStart = new Date(start.getTime() - padMs);
+  const spanEnd = new Date(end.getTime() + padMs);
+  const span = Math.max(1, spanEnd.getTime() - spanStart.getTime());
 
   const W = 1000;
   const H = 84;
@@ -28,20 +53,29 @@ function AchievementsTrail({ journey }: { journey: JourneyItem[] }) {
   const innerW = W - padX * 2;
   const trailY = (H - padBottom + padTop) / 2;
 
-  const xOf = (d: Date) => padX + ((d.getTime() - start.getTime()) / span) * innerW;
-  const todayX = xOf(today);
+  const xOf = (d: Date) => padX + ((d.getTime() - spanStart.getTime()) / span) * innerW;
+  const todayX = xOf(now);
 
+  // Tick marks every two years across the visible span.
   const years: { year: number; x: number }[] = [];
-  for (let y = start.getFullYear(); y <= end.getFullYear(); y += 2) {
+  for (let y = spanStart.getFullYear(); y <= spanEnd.getFullYear(); y += 2) {
     const d = new Date(y, 0, 1);
-    if (d >= start && d <= end) years.push({ year: y, x: xOf(d) });
+    if (d >= spanStart && d <= spanEnd) years.push({ year: y, x: xOf(d) });
   }
 
   return (
     <div className="ach-trail">
       <svg width="100%" height={H} viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none">
-        <line x1={padX} y1={trailY} x2={todayX} y2={trailY} stroke="var(--accent)" strokeWidth="2.5" strokeLinecap="round" opacity="0.85" />
-        <line x1={todayX} y1={trailY} x2={W - padX} y2={trailY} stroke="var(--ink-4)" strokeWidth="1.5" strokeDasharray="4 5" strokeLinecap="round" opacity="0.55" />
+        <line
+          x1={padX}
+          y1={trailY}
+          x2={todayX}
+          y2={trailY}
+          stroke="var(--accent)"
+          strokeWidth="2.5"
+          strokeLinecap="round"
+          opacity="0.85"
+        />
 
         {years.map(t => (
           <g key={t.year}>
@@ -57,19 +91,17 @@ function AchievementsTrail({ journey }: { journey: JourneyItem[] }) {
           TODAY
         </text>
 
-        {journey.map(m => {
-          const x = xOf(m.date);
-          const past = m.unlocked && !m.fresh;
+        {sorted.map(m => {
+          const x = xOf(m.date!);
           const current = m.fresh;
           return (
             <g key={m.key} transform={`translate(${x}, ${trailY})`}>
               {current && <circle r="14" fill="var(--accent)" opacity="0.18" />}
               <circle
                 r="8"
-                fill={current ? 'var(--accent)' : past ? 'var(--paper)' : 'var(--paper-2)'}
-                stroke={past || current ? 'var(--accent)' : 'var(--line)'}
+                fill={current ? 'var(--accent)' : 'var(--paper)'}
+                stroke="var(--accent)"
                 strokeWidth={current ? 2 : 1.25}
-                strokeDasharray={!m.unlocked ? '1.5 2' : '0'}
               />
               {current && <circle r="3" fill="white" />}
             </g>
@@ -109,31 +141,96 @@ function AchievementsConfetti() {
   );
 }
 
-export function AchievementsView({ onReplayToast }: { data: MatmonData; onReplayToast: () => void }) {
-  const journey: JourneyItem[] = [
-    { key: 'first_import',       glyph: '✦', title: 'Welcome aboard',     copy: 'First CSV imported.',                  date: new Date(2018, 5, 12),  unlocked: true },
-    { key: 'first_10k',          glyph: '◆', title: 'Five digits',         copy: '$10K. Serious money now.',             date: new Date(2018, 7, 3),   unlocked: true },
-    { key: 'first_dividend',     glyph: '✿', title: 'First dividend',      copy: 'Your money made money.',               date: new Date(2018, 8, 28),  unlocked: true },
-    { key: 'one_year_in',        glyph: '⊙', title: 'One year on the books', copy: 'A whole calendar of returns.',       date: new Date(2019, 5, 12),  unlocked: true },
-    { key: 'first_1k_div',       glyph: '✿', title: '$1K in dividends',    copy: 'A steady stream forms.',               date: new Date(2020, 1, 14),  unlocked: true },
-    { key: 'survived_drawdown',  glyph: '⌇', title: 'Held through a dip',  copy: 'Down 10% and you held.',               date: new Date(2020, 3, 4),   unlocked: true },
-    { key: 'first_100k',         glyph: '◈', title: 'Six digits',          copy: '$100K. Tell someone you trust.',       date: new Date(2021, 2, 21),  unlocked: true },
-    { key: 'diversified',        glyph: '✤', title: 'Spread the eggs',     copy: '10 holdings, 3+ sectors.',             date: new Date(2022, 6, 22),  unlocked: true },
-    { key: 'five_years_in',      glyph: '⌾', title: 'Five years',          copy: 'Old-timer rights unlocked.',           date: new Date(2023, 5, 12),  unlocked: true },
-    { key: 'first_500k',         glyph: '◉', title: 'Half a million',      copy: 'Power of compounding, visible.',       date: new Date(2023, 10, 9),  unlocked: true },
-    { key: 'beat_spy_1y',        glyph: '↗', title: 'Beat the S&P',        copy: 'You did the thing.',                   date: new Date(2023, 11, 31), unlocked: true },
-    { key: 'maxed_ira',          glyph: '♆', title: 'IRA maxed',           copy: 'Future you sends thanks.',             date: new Date(2024, 3, 12),  unlocked: true },
-    { key: 'first_million',      glyph: '☉', title: 'A millionaire',       copy: 'Go buy your mom some flowers.',        date: new Date(2026, 4, 17),  unlocked: true, fresh: true },
-    { key: 'maxed_401k',         glyph: '♅', title: '401(k) maxed',        copy: '$5,100 to go this tax year.',          date: new Date(2026, 11, 31), unlocked: false, progress: 0.78, context: '$18,400 of $23,500' },
-    { key: 'hsa_covered',        glyph: '⚕', title: 'HSA covers healthcare', copy: 'Triple-tax-advantaged at work.',     date: new Date(2029, 0, 1),   unlocked: false, progress: 0.56, context: '~3 years out at 7% real' },
-    { key: 'two_million',        glyph: '☉', title: 'Two commas',          copy: "Don't get weird about it.",            date: new Date(2033, 4, 17),  unlocked: false, progress: 0.60, context: '~7 years out at 7% real' },
-    { key: 'hidden_1',           glyph: '★', title: 'Hidden ahead',         copy: 'A surprise is part of the fun.',      date: new Date(2050, 0, 1),   unlocked: false, secret: true },
-  ];
+/**
+ * Picks up to 3 not-yet-unlocked, non-secret milestones to feature in "Coming up next".
+ *
+ * Strategy:
+ *   1. Value milestones whose threshold is greater than the user's current value,
+ *      sorted ascending by threshold (so the nearest one shows first).
+ *   2. If we still need more, pad with the next non-value catalog entries that
+ *      aren't unlocked and aren't secret (stable catalog order).
+ */
+function pickUpcoming(joined: JoinedMilestone[], currentValue: number): JoinedMilestone[] {
+  const locked = joined.filter(m => !m.unlocked && m.category !== 'secret');
 
-  const latest = journey.find(j => j.fresh);
-  const upcoming = journey.filter(j => !j.unlocked && !j.secret).slice(0, 3);
-  const unlockedList = journey.filter(j => j.unlocked).sort((a, b) => +b.date - +a.date);
-  const lockedList = journey.filter(j => !j.unlocked);
+  const nextValue = locked
+    .filter(m => m.thresholdValue != null && m.thresholdValue > currentValue)
+    .sort((a, b) => (a.thresholdValue! - b.thresholdValue!));
+
+  const nonValue = locked.filter(m => m.thresholdValue == null);
+
+  const out: JoinedMilestone[] = [];
+  for (const m of [...nextValue, ...nonValue]) {
+    if (out.length >= 3) break;
+    out.push(m);
+  }
+  return out;
+}
+
+function formatDate(d: Date): string {
+  return d.toLocaleDateString('en-US', { month: 'short', year: 'numeric' });
+}
+
+export function AchievementsView({ data, onReplayToast }: { data: MatmonData; onReplayToast: () => void }) {
+  const [unlocks, setUnlocks] = useState<UnlockRow[] | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    listAchievements()
+      .then(rows => {
+        if (cancelled) return;
+        const parsed: UnlockRow[] = rows.map(r => ({
+          key: r.milestone_key,
+          date: new Date(r.unlocked_at),
+        }));
+        setUnlocks(parsed);
+      })
+      .catch(() => {
+        if (!cancelled) setUnlocks([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Until we know what's unlocked, render a minimal header so the page doesn't flicker.
+  if (unlocks === null) {
+    return (
+      <div>
+        <PageHead title="Achievements" meta={<div className="muted">Loading milestones...</div>} />
+      </div>
+    );
+  }
+
+  const now = new Date();
+  const joined = joinCatalogWithUnlocks(unlocks, now);
+  const unlockedList = joined.filter(m => m.unlocked).sort((a, b) => b.date!.getTime() - a.date!.getTime());
+  const lockedList = joined.filter(m => !m.unlocked);
+
+  // Empty state: no unlocks at all. Show a friendly nudge and stop.
+  if (unlockedList.length === 0) {
+    return (
+      <div>
+        <PageHead
+          title="Achievements"
+          meta={
+            <div>
+              <div>0 unlocked · {lockedList.length} ahead</div>
+              <div style={{ marginTop: 2, color: 'var(--ink-4)' }}>Earned, not chased</div>
+            </div>
+          }
+        />
+        <div className="ach-empty">
+          <div className="ach-empty-glyph">✦</div>
+          <h2 className="ach-empty-title">Your first milestone is right around the corner</h2>
+          <p className="ach-empty-copy">Import a CSV and let the numbers do the talking.</p>
+        </div>
+      </div>
+    );
+  }
+
+  const fresh = unlockedList.find(m => m.fresh) ?? null;
+  const upcoming = pickUpcoming(joined, data.totalValue);
 
   return (
     <div>
@@ -149,15 +246,15 @@ export function AchievementsView({ onReplayToast }: { data: MatmonData; onReplay
         }
       />
 
-      <AchievementsTrail journey={journey} />
+      <AchievementsTrail unlocked={unlockedList} now={now} />
 
-      {latest && (
+      {fresh && (
         <div className="ach-hero">
-          <div className="ach-hero-glyph">{latest.glyph}</div>
+          <div className="ach-hero-glyph">{fresh.glyph}</div>
           <div className="ach-hero-body">
             <div className="ach-hero-eyebrow">Just unlocked · today</div>
-            <h2 className="ach-hero-title">{latest.title}</h2>
-            <p className="ach-hero-copy">{latest.copy}</p>
+            <h2 className="ach-hero-title">{fresh.title}</h2>
+            <p className="ach-hero-copy">{fresh.copy}</p>
             <div className="ach-hero-actions">
               <button className="btn" onClick={onReplayToast}>
                 Replay celebration
@@ -169,34 +266,54 @@ export function AchievementsView({ onReplayToast }: { data: MatmonData; onReplay
         </div>
       )}
 
-      <div className="ach-section-head">
-        <h3>Coming up next</h3>
-        <span className="muted" style={{ fontSize: 11.5, fontFamily: 'var(--font-mono)' }}>
-          {upcoming.length} on deck
-        </span>
-      </div>
-      <div className="ach-upcoming">
-        {upcoming.map(m => (
-          <div className="ach-upcoming-card" key={m.key}>
-            <div className="ach-upcoming-glyph">{m.glyph}</div>
-            <div style={{ flex: 1, minWidth: 0 }}>
-              <div className="ach-upcoming-title">{m.title}</div>
-              <div className="ach-upcoming-copy">{m.copy}</div>
-              <div className="ach-progress">
-                <div className="ach-progress-bar">
-                  <div className="ach-progress-fill" style={{ width: `${(m.progress || 0) * 100}%` }} />
-                </div>
-                <div className="ach-progress-meta">
-                  <span className="num">{Math.round((m.progress || 0) * 100)}%</span>
-                  <span className="muted" style={{ marginLeft: 8 }}>
-                    {m.context}
-                  </span>
-                </div>
-              </div>
-            </div>
+      {upcoming.length > 0 && (
+        <>
+          <div className="ach-section-head">
+            <h3>Coming up next</h3>
+            <span className="muted" style={{ fontSize: 11.5, fontFamily: 'var(--font-mono)' }}>
+              {upcoming.length} on deck
+            </span>
           </div>
-        ))}
-      </div>
+          <div className="ach-upcoming">
+            {upcoming.map(m => {
+              const isValue = m.thresholdValue != null;
+              // Real progress for value milestones. Cap at 99 to keep the bar honest
+              // about not-yet-met — 100% means unlocked.
+              const pct = isValue
+                ? Math.max(0, Math.min(99, Math.round((data.totalValue / m.thresholdValue!) * 100)))
+                : null;
+              return (
+                <div className="ach-upcoming-card" key={m.key}>
+                  <div className="ach-upcoming-glyph">{m.glyph}</div>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div className="ach-upcoming-title">{m.title}</div>
+                    <div className="ach-upcoming-copy">{m.copy}</div>
+                    {isValue && pct != null ? (
+                      <div className="ach-progress">
+                        <div className="ach-progress-bar">
+                          <div className="ach-progress-fill" style={{ width: `${pct}%` }} />
+                        </div>
+                        <div className="ach-progress-meta">
+                          <span className="num">{pct}%</span>
+                          <span className="muted" style={{ marginLeft: 8 }}>
+                            {m.description}
+                          </span>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="ach-progress">
+                        <div className="ach-progress-meta">
+                          <span className="muted">{m.description}</span>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </>
+      )}
 
       <div className="ach-section-head" style={{ marginTop: 32 }}>
         <h3>Your collection</h3>
@@ -209,18 +326,19 @@ export function AchievementsView({ onReplayToast }: { data: MatmonData; onReplay
           <div className={`ach-stamp ${m.fresh ? 'fresh' : ''}`} key={m.key}>
             <div className="ach-stamp-glyph">{m.glyph}</div>
             <div className="ach-stamp-title">{m.title}</div>
-            <div className="ach-stamp-date">
-              {m.date.toLocaleDateString('en-US', { month: 'short', year: 'numeric' })}
+            <div className="ach-stamp-date">{formatDate(m.date!)}</div>
+          </div>
+        ))}
+        {lockedList.map(m => {
+          const secret = m.category === 'secret';
+          return (
+            <div className="ach-stamp locked" key={m.key}>
+              <div className="ach-stamp-glyph">{secret ? '?' : m.glyph}</div>
+              <div className="ach-stamp-title">{secret ? 'Hidden ahead' : m.title}</div>
+              <div className="ach-stamp-date">{secret ? '???' : m.description}</div>
             </div>
-          </div>
-        ))}
-        {lockedList.map(m => (
-          <div className="ach-stamp locked" key={m.key}>
-            <div className="ach-stamp-glyph">{m.secret ? '?' : m.glyph}</div>
-            <div className="ach-stamp-title">{m.secret ? 'Hidden ahead' : m.title}</div>
-            <div className="ach-stamp-date">{m.secret ? '???' : m.context || 'On the way'}</div>
-          </div>
-        ))}
+          );
+        })}
       </div>
     </div>
   );
