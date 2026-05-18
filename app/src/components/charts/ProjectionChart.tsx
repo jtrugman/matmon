@@ -92,7 +92,8 @@ export function ProjectionChart({ contributions, growth, goal, height = 240 }: P
         ))}
         {contributions
           .filter(
-            (_, i) => i % Math.max(1, Math.floor(contributions.length / 6)) === 0 || i === contributions.length - 1,
+            (_, i) =>
+              i % Math.max(1, Math.floor(contributions.length / 6)) === 0 || i === contributions.length - 1,
           )
           .map((c, i) => (
             <text
@@ -112,7 +113,9 @@ export function ProjectionChart({ contributions, growth, goal, height = 240 }: P
         <path d={contribArea} fill="var(--ink-3)" opacity="0.18" />
         <path
           d={contributions
-            .map((c, i) => `${i === 0 ? 'M' : 'L'} ${xScale(c.year).toFixed(1)} ${yScale(c.value).toFixed(1)}`)
+            .map(
+              (c, i) => `${i === 0 ? 'M' : 'L'} ${xScale(c.year).toFixed(1)} ${yScale(c.value).toFixed(1)}`,
+            )
             .join(' ')}
           fill="none"
           stroke="var(--ink-3)"

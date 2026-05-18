@@ -32,11 +32,7 @@ function baseSlug(name: string): string {
  * tends to include the brokerage ("Fidelity Taxable"), and adding it again
  * produces noisy IDs like "fidelity-fidelity-taxable".
  */
-export function slugifyAccountId(
-  name: string,
-  _brokerage: string,
-  existingIds: string[] = [],
-): string {
+export function slugifyAccountId(name: string, _brokerage: string, existingIds: string[] = []): string {
   const base = baseSlug(name);
   const taken = new Set(existingIds);
   if (!taken.has(base)) return base;

@@ -26,7 +26,13 @@ describe('MILESTONE_CATALOG', () => {
 
   it('every entry has key, glyph, title, copy, category, and description', () => {
     const validCategories: MilestoneCategory[] = [
-      'value', 'activity', 'dividends', 'tenure', 'discipline', 'planning', 'secret',
+      'value',
+      'activity',
+      'dividends',
+      'tenure',
+      'discipline',
+      'planning',
+      'secret',
     ];
     for (const m of MILESTONE_CATALOG) {
       expect(m.key, `key on ${JSON.stringify(m)}`).toMatch(/^[a-z0-9_]+$/);

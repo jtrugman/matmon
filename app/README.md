@@ -47,29 +47,48 @@ The bundle icon set in `src-tauri/icons/` is a generated placeholder. Replace `s
 
 ## Updating the app icon
 
-The Dock and Finder render the macOS app icon from `src-tauri/icons/icon.icns`, which gets copied into `Matmon.app/Contents/Resources/` during the Tauri bundle step. Two things commonly trip people up:
+The Dock and Finder render the macOS app icon from whatever `.icns` lives inside the running `.app` bundle's `Contents/Resources/`. Tauri copies `src-tauri/icons/icon.icns` into that path at bundle time, but the bundle is only assembled by `tauri build`, not by `tauri dev`.
 
-1. `tauri dev` rebuilds the Rust binary but does **not** always regenerate the `.app` bundle layout, so an old `icon.icns` from a previous build can keep showing up in the Dock.
-2. `tauri icon` shells out to Pillow, whose `.icns` writer produces a non-standard file that macOS sometimes silently falls back from to the generic doc icon.
+### Where the Dock icon comes from in each mode
 
-The fix is to (a) regenerate icons with macOS's native `sips` + `iconutil`, which produce a real Apple-format `.icns`, and (b) force Tauri to rebuild the bundle so the new icon actually lands in `Matmon.app`.
+| Mode | Command | What runs | Dock icon source |
+| --- | --- | --- | --- |
+| Production | `npm run tauri:build` | `Matmon.app/Contents/MacOS/matmon` from the produced `.app` | `Matmon.app/Contents/Resources/icon.icns` (vault) |
+| Dev | `npm run tauri:dev` | Bare `src-tauri/target/debug/matmon` binary, no `.app` wrapper | macOS generic placeholder (the binary has no embedded icns) |
 
-### Standard refresh
+So if you launch `tauri:dev` you will see a generic placeholder in the Dock and that is expected: `tauri dev` on macOS deliberately skips the `.app` bundling step to keep iteration fast. The only way to see the real vault icon in the Dock is to run `tauri:build` and open the produced bundle. There is no Tauri-supported workaround for this in dev mode short of building a full bundle every time, which would defeat the point of dev mode.
+
+If you want a live "looks like prod" run, do:
 
 ```bash
-# 1. Drop your new 1024x1024 source PNG at src-tauri/icons/source.png, then:
-cd app
-npm run icons:rebuild
-
-# 2. Quit any running Tauri dev window (Cmd+Q in the app), then:
-npm run tauri:dev
+npm run tauri:build              # produces src-tauri/target/release/bundle/macos/Matmon.app
+open src-tauri/target/release/bundle/macos/Matmon.app
 ```
 
-`icons:rebuild` writes `icon.icns` (via `iconutil`), `icon.png`, `32x32.png`, `128x128.png`, `128x128@2x.png`, and `icon.ico` (via `sips`) from the same source. The script lives at `scripts/regen-icons.sh`.
+### Regenerating the icon set from a new source image
+
+Drop your new 1024x1024 PNG at `src-tauri/icons/source.png` and run:
+
+```bash
+cd app
+npm run icons:rebuild
+```
+
+`icons:rebuild` writes `icon.icns` (via `iconutil`, a real Apple-format icns the Dock and LaunchServices trust), `icon.png`, `32x32.png`, `128x128.png`, `128x128@2x.png`, and `icon.ico` (multi-size Windows icon, written via Pillow with a `sips` fallback). The script lives at `scripts/regen-icons.sh`.
+
+After regenerating icons, run `npm run tauri:build` again to roll a fresh `.app` that embeds them.
 
 ### If the icon still looks stale after rebuilding
 
-That means the macOS icon services cache (keyed by bundle id `app.matmon.desktop`) is holding onto the old image. Wipe it and restart the Dock and Finder:
+That means the macOS icon services cache (keyed by bundle id `app.matmon.desktop`) is holding onto the old image. One command:
+
+```bash
+npm run icons:flush
+```
+
+That runs `scripts/flush-icon-cache.sh`, which wipes `/Library/Caches/com.apple.iconservices.store`, the per-user IconServices and Dock icon caches under `/private/var/folders`, and restarts Dock and Finder. It will prompt for `sudo` once.
+
+If you'd rather run it manually, the equivalent block is:
 
 ```bash
 sudo rm -rfv /Library/Caches/com.apple.iconservices.store
@@ -86,7 +105,11 @@ If you suspect cargo is reusing a stale build artifact, run:
 npm run dev:fresh
 ```
 
-That runs `cargo clean` inside `src-tauri/` and then `npm run tauri:dev`, which forces Tauri to rebuild the Rust binary **and** the `.app` bundle from scratch. Slow (a few minutes) but guaranteed clean.
+That runs `cargo clean` inside `src-tauri/` and then `npm run tauri:dev`, which forces Tauri to rebuild the Rust binary from scratch. Slow (a few minutes) but guaranteed clean. (Same dev-mode icon caveat above still applies: you'll see a generic placeholder in the Dock because no `.app` bundle is produced.)
+
+### Windows and Linux icons
+
+`src-tauri/tauri.conf.json` references `icons/icon.ico` for Windows installers (`msi`, `nsis`) and the various `icons/*.png` sizes for Linux (`deb`, `appimage`). `npm run icons:rebuild` regenerates all of them from the same `source.png`, so a single source swap covers every platform.
 
 ## What's wired up
 

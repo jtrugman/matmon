@@ -24,7 +24,9 @@ describe('saveUserProfile + loadUserProfile', () => {
   });
 
   it('round-trips every field', async () => {
-    await saveUserProfile(profile({ name: 'Justin', birthYear: 1985, retireAge: 67, household: 'partnered' }));
+    await saveUserProfile(
+      profile({ name: 'Justin', birthYear: 1985, retireAge: 67, household: 'partnered' }),
+    );
     const out = await loadUserProfile();
     expect(out).not.toBeNull();
     expect(out!.name).toBe('Justin');

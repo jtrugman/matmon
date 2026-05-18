@@ -125,4 +125,3 @@ describe('Column-mapping wizard', () => {
     expect(parsed[key].symbol).toBe('ticker');
   });
 });
-

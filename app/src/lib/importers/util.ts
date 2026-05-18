@@ -14,10 +14,13 @@ export function parseNumber(s: string | undefined | null): number {
 export function parseDate(s: string | undefined | null): Date {
   if (!s) return new Date(NaN);
   const trimmed = s.trim();
+  // All branches use Date.UTC so the imported date doesn't shift by a day for
+  // users west of UTC (e.g. someone in UTC+10 importing at midnight local
+  // would otherwise see every date land one day earlier in the DB).
   // ISO YYYY-MM-DD or YYYY/MM/DD
   if (/^\d{4}[-/]\d{1,2}[-/]\d{1,2}/.test(trimmed)) {
     const [y, m, d] = trimmed.split(/[-/]/).map(Number);
-    return new Date(y, m - 1, d);
+    return new Date(Date.UTC(y, m - 1, d));
   }
   // MM/DD/YYYY or MM/DD/YY
   const us = trimmed.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})/);
@@ -26,7 +29,7 @@ export function parseDate(s: string | undefined | null): Date {
     const d = Number(us[2]);
     let y = Number(us[3]);
     if (y < 100) y += y < 50 ? 2000 : 1900;
-    return new Date(y, m - 1, d);
+    return new Date(Date.UTC(y, m - 1, d));
   }
   // MM-DD-YYYY
   const dash = trimmed.match(/^(\d{1,2})-(\d{1,2})-(\d{2,4})/);
@@ -35,7 +38,7 @@ export function parseDate(s: string | undefined | null): Date {
     const d = Number(dash[2]);
     let y = Number(dash[3]);
     if (y < 100) y += y < 50 ? 2000 : 1900;
-    return new Date(y, m - 1, d);
+    return new Date(Date.UTC(y, m - 1, d));
   }
   const parsed = new Date(trimmed);
   return parsed;
@@ -71,11 +74,9 @@ export function mapAction(raw: string): Action | null {
   return null;
 }
 
-let hashSeed = 0;
 export function rowHash(parts: (string | number | null | undefined)[]): string {
   // Deterministic but cheap fingerprint for dedupe. Not cryptographic.
   let h = 5381;
-  hashSeed++;
   for (const p of parts) {
     const s = String(p ?? '');
     for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0;

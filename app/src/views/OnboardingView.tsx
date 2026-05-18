@@ -1,51 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { isTauri } from '../lib/env';
 import { BrokerageLogo } from '../components/BrokerageLogo';
+import { UniversalTemplateView } from './UniversalTemplateView';
 import { importCsv } from '../lib/importers';
 import type { ImporterResult, ParsedTransaction } from '../lib/importers/types';
+import { pickFunNamesForRows } from '../lib/funNames';
 
 const STEPS = ['Welcome', 'About you', 'Your goal', 'Your first account', "You're set"];
-// Bigger pool of playful account names; 5 randomly chosen per onboarding session.
-const SUGGEST_POOL = [
-  'The Lighthouse',
-  'The Roost',
-  'The Greenhouse',
-  'The Workshop',
-  'The Hatch',
-  'The Annex',
-  "My Girlfriend's a Princess Fund",
-  "My Boyfriend's a Prince Fund",
-  'Future Me Thanks You',
-  'The Slow Boat',
-  'The Beach House Bet',
-  'Operation Touch Grass',
-  'The Quiet Wealth',
-  'Bagel Money',
-  'The Long Lever',
-  'Compound, Baby',
-  'The Acorn Pile',
-  'Dragon Vault',
-  'Buy the Dip Society',
-  "Don't Touch This",
-  'The Patience Project',
-  'The Forever Account',
-  'Coast Mode',
-  'The Rainy Day',
-  'My Eventual Cabin',
-  'The Slow Cooker',
-  'Yacht Optional',
-  'The Big Quiet',
-];
-function pickFunNames(seed: number, count = 5): string[] {
-  // Deterministic-per-session shuffle so the user sees a stable set,
-  // but a different set on a fresh onboarding session.
-  const out = [...SUGGEST_POOL];
-  for (let i = out.length - 1; i > 0; i--) {
-    const j = Math.floor(((Math.sin(seed * (i + 1) * 12.9898) + 1) / 2) * (i + 1));
-    [out[i], out[j]] = [out[j], out[i]];
-  }
-  return out.slice(0, count);
-}
 
 type Profile = {
   name: string;
@@ -60,13 +21,18 @@ export type OnboardingUpload = {
   brokerage: string;
   accountType: string;
   accountName: string;
-  /** Brokerage-assigned account number (raw — may be masked like "XXXX1234"). */
+  /** Brokerage-assigned account number (raw, may be masked like "XXXX1234"). */
   accountNumber?: string;
   /** Original detected account name from the multi-account file ("Individual",
    *  "Self-Directed-Ret", etc.). Used as the third token in the canonical
    *  "<last4> <brokerage> <name>" auto-name. */
   detectedName?: string;
   transactions: ParsedTransaction[];
+  /** Current market prices observed in the source file (holdings-only
+   *  importers like JPM positions populate this). The persistence layer in
+   *  App.tsx writes these into the prices table so portfolio aggregation can
+   *  value the position at market, not at cost basis. */
+  marketPrices?: Array<{ symbol: string; price: number; asOf: Date }>;
 };
 
 /** Pull the trailing 4-digit window from a brokerage account number that may
@@ -107,6 +73,11 @@ export function OnboardingView({ onComplete, onSkip, onPreviewTheme }: Props) {
   });
   const [goal, setGoal] = useState(3_000_000);
   const [uploads, setUploads] = useState<OnboardingUpload[]>([]);
+  // When true, the AddAccount step swaps to the dedicated Universal Template
+  // view. Clicking "Back to Add Account" on that view flips this back off.
+  // Completing an import there bypasses the rest of onboarding (the universal
+  // template view writes to the DB directly) and lands the user on Home.
+  const [showUniversalTemplate, setShowUniversalTemplate] = useState(false);
 
   const next = () => setStep(s => Math.min(STEPS.length - 1, s + 1));
   const back = () => setStep(s => Math.max(0, s - 1));
@@ -147,15 +118,27 @@ export function OnboardingView({ onComplete, onSkip, onPreviewTheme }: Props) {
       </div>
 
       <div className="ob-body">
-        {step === 0 && <Welcome onStart={next} onSkip={onSkip} />}
+        {step === 0 && <Welcome onStart={next} />}
         {step === 1 && (
           <ProfileStep profile={profile} setProfile={setProfile} onPreviewTheme={onPreviewTheme} />
         )}
         {step === 2 && <GoalStep profile={profile} goal={goal} setGoal={setGoal} />}
-        {step === 3 && (
+        {step === 3 && !showUniversalTemplate && (
           <AddAccountStep
             uploads={uploads}
             setUploads={setUploads}
+            onUseUniversalTemplate={() => setShowUniversalTemplate(true)}
+          />
+        )}
+        {step === 3 && showUniversalTemplate && (
+          <UniversalTemplateView
+            backLabel="Add account"
+            onBack={() => setShowUniversalTemplate(false)}
+            // The dedicated universal-template view writes directly to the DB,
+            // so on completion we persist the profile + goal that the user
+            // collected in earlier steps (with no uploads, since those are
+            // already saved) and land them on Home.
+            onComplete={() => onComplete({ profile, goal, uploads: [] })}
           />
         )}
         {step === 4 && (
@@ -168,7 +151,7 @@ export function OnboardingView({ onComplete, onSkip, onPreviewTheme }: Props) {
         )}
       </div>
 
-      {step !== 0 && step !== 4 && (
+      {step !== 0 && step !== 4 && !(step === 3 && showUniversalTemplate) && (
         <div className="ob-footer">
           <button className="btn btn-ghost" onClick={back}>
             Back
@@ -193,13 +176,23 @@ export function OnboardingView({ onComplete, onSkip, onPreviewTheme }: Props) {
   );
 }
 
-function Welcome({ onStart, onSkip }: { onStart: () => void; onSkip: () => void }) {
+function Welcome({ onStart }: { onStart: () => void }) {
   return (
     <div className="ob-welcome">
       <div className="ob-welcome-glyph">
         <svg width="56" height="56" viewBox="0 0 56 56" fill="none">
-          <path d="M28 6 L52 22 L44 50 L12 50 L4 22 Z" fill="var(--accent-soft)" stroke="var(--accent)" strokeWidth="1.25" />
-          <path d="M28 16 L40 24 L36 38 L20 38 L16 24 Z" fill="none" stroke="var(--accent)" strokeWidth="1.25" />
+          <path
+            d="M28 6 L52 22 L44 50 L12 50 L4 22 Z"
+            fill="var(--accent-soft)"
+            stroke="var(--accent)"
+            strokeWidth="1.25"
+          />
+          <path
+            d="M28 16 L40 24 L36 38 L20 38 L16 24 Z"
+            fill="none"
+            stroke="var(--accent)"
+            strokeWidth="1.25"
+          />
           <circle cx="28" cy="28" r="3.5" fill="var(--accent)" />
         </svg>
       </div>
@@ -210,8 +203,8 @@ function Welcome({ onStart, onSkip }: { onStart: () => void; onSkip: () => void 
         that respects your data.
       </h1>
       <p className="ob-welcome-copy">
-        Everything you import stays on this machine. The only data that ever leaves is anonymous ticker requests for
-        current prices.
+        Everything you import stays on this machine. The only data that ever leaves is anonymous ticker
+        requests for current prices.
       </p>
       <div className="ob-welcome-bullets">
         <div className="ob-bullet">
@@ -241,9 +234,6 @@ function Welcome({ onStart, onSkip }: { onStart: () => void; onSkip: () => void 
         >
           Let's set you up
         </button>
-        <button className="btn btn-ghost" onClick={onSkip}>
-          Try with a sample portfolio
-        </button>
       </div>
       <p
         style={{
@@ -271,7 +261,7 @@ function ProfileStep({
   onPreviewTheme?: (t: 'light' | 'dark') => void;
 }) {
   const set = (k: keyof Profile, v: any) => setProfile({ ...profile, [k]: v });
-  const currentAge = 2026 - profile.birthYear;
+  const currentAge = new Date().getFullYear() - profile.birthYear;
 
   // Local string buffers so the user can type a partial value (e.g., "1" on
   // the way to "1985") without the parent's clamp slamming it to the min on
@@ -424,7 +414,9 @@ function ProfileStep({
 
         <div className="ob-field-row">
           <div className="ob-field">
-            <label>Default Theme <span className="ob-field-hint">Tap one, the app changes around you</span></label>
+            <label>
+              Default Theme <span className="ob-field-hint">Tap one, the app changes around you</span>
+            </label>
             <div className="ob-toggle-pair">
               <button
                 className={`ob-toggle ${profile.theme === 'light' ? 'active' : ''}`}
@@ -460,17 +452,17 @@ function GoalStep({
   goal: number;
   setGoal: (n: number) => void;
 }) {
-  const yearsOut = Math.max(1, profile.retireAge - (2026 - profile.birthYear));
+  const yearsOut = Math.max(1, profile.retireAge - (new Date().getFullYear() - profile.birthYear));
   const tagline =
     goal < 1_000_000
       ? 'Solid foundation goal'
       : goal < 2_500_000
-      ? 'Comfortable retirement number'
-      : goal < 5_000_000
-      ? 'Ambitious, fully achievable'
-      : goal < 10_000_000
-      ? 'Pillar-of-the-community territory'
-      : 'Generational money';
+        ? 'Comfortable retirement number'
+        : goal < 5_000_000
+          ? 'Ambitious, fully achievable'
+          : goal < 10_000_000
+            ? 'Pillar-of-the-community territory'
+            : 'Generational money';
 
   // Click-to-edit: the big "$X.XM" reads as a display until the user clicks
   // it. Then it swaps to a focused input showing long-form digits; on blur
@@ -597,7 +589,7 @@ function GoalStep({
               Target year
             </span>
             <div className="num" style={{ fontSize: 18, marginTop: 4 }}>
-              {2026 + yearsOut}
+              {new Date().getFullYear() + yearsOut}
             </div>
             <div className="muted" style={{ fontSize: 11, fontFamily: 'var(--font-mono)' }}>
               {yearsOut} years out · age {profile.retireAge}
@@ -624,7 +616,6 @@ function GoalStep({
           </div>
         </div>
       </div>
-
     </div>
   );
 }
@@ -650,16 +641,28 @@ function defaultTechName(brokerage: string, accountType: string): string {
 function AddAccountStep({
   uploads,
   setUploads,
+  onUseUniversalTemplate,
 }: {
   uploads: OnboardingUpload[];
   setUploads: (u: OnboardingUpload[]) => void;
+  /** Navigate to the dedicated Universal Template page (rendered inline within
+   *  the onboarding shell). The link below the primary dropzone fires this. */
+  onUseUniversalTemplate: () => void;
 }) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [dragging, setDragging] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
-  // Random selection of fun names; stable per session so suggestions don't reshuffle on every keystroke.
-  const suggestNames = useMemo(() => pickFunNames(Date.now() % 9973, 5), []);
+  // Per-row disjoint suggestion slices: when a multi-account CSV expands into
+  // multiple UploadRows, each row gets its OWN 5 names with zero overlap. The
+  // seed is captured once on mount; the memo only rebuilds when the row count
+  // changes (a new upload was added or removed), so existing rows' pills stay
+  // stable across keystrokes.
+  const seedRef = useRef(Date.now() % 9973);
+  const namesForRows = useMemo(
+    () => pickFunNamesForRows(seedRef.current, uploads.length, 5),
+    [uploads.length],
+  );
 
   async function ingestFiles(files: FileList | File[]) {
     setErrorMsg(null);
@@ -681,6 +684,12 @@ function AddAccountStep({
         }
         const brokerage = result.inferences.brokerage;
 
+        // Market prices live at the file level (one per unique symbol), not
+        // per account, so every upload spawned from this file shares the same
+        // marketPrices array. The downstream upsert is idempotent in
+        // (symbol, date), so doing this per-upload is safe.
+        const marketPrices = result.marketPrices;
+
         // Multi-account file (e.g. Fidelity multi-account export, JPM holdings
         // with multiple accounts): split into one upload per detected account
         // so the user names + types each individually.
@@ -695,6 +704,7 @@ function AddAccountStep({
               accountNumber: acc.accountNumber,
               detectedName: acc.name,
               transactions: acc.transactions,
+              ...(marketPrices ? { marketPrices } : {}),
             };
             draft.accountName = canonicalName(draft);
             added.push(draft);
@@ -702,13 +712,15 @@ function AddAccountStep({
           continue;
         }
 
-        const accountType = result.inferences.accountType === 'unknown' ? 'taxable' : result.inferences.accountType;
+        const accountType =
+          result.inferences.accountType === 'unknown' ? 'taxable' : result.inferences.accountType;
         added.push({
           fileName: file.name,
           brokerage,
           accountType,
           accountName: defaultTechName(brokerage, accountType),
           transactions: result.transactions,
+          ...(marketPrices ? { marketPrices } : {}),
         });
       } catch (e: any) {
         setErrorMsg(`${file.name}: ${e?.message || 'could not read file'}`);
@@ -743,8 +755,8 @@ function AddAccountStep({
       <div className="ob-step-head">
         <h2 className="ob-step-title">Bring in your accounts.</h2>
         <p className="ob-step-sub">
-          Drop one or more CSVs from any supported brokerage. Read locally, never uploaded. You can keep adding
-          more later from the sidebar.
+          Drop one or more CSVs from any supported brokerage. Read locally, never uploaded. You can keep
+          adding more later from the sidebar.
         </p>
       </div>
 
@@ -774,7 +786,16 @@ function AddAccountStep({
           }}
         />
         <div className="dropzone-glyph">
-          <svg width="48" height="48" viewBox="0 0 48 48" fill="none" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" strokeLinejoin="round">
+          <svg
+            width="48"
+            height="48"
+            viewBox="0 0 48 48"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.25"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          >
             <path d="M24 30V8" />
             <path d="M14 18l10-10 10 10" />
             <path d="M8 32v6a2 2 0 0 0 2 2h28a2 2 0 0 0 2-2v-6" />
@@ -784,12 +805,49 @@ function AddAccountStep({
         <div className="dropzone-sub">Or click to browse. Pick one, or pick a bunch.</div>
       </div>
 
+      <div
+        data-testid="universal-template-link"
+        style={{
+          marginTop: 14,
+          display: 'flex',
+          justifyContent: 'center',
+          fontSize: 13,
+          color: 'var(--ink-3)',
+        }}
+      >
+        <button
+          type="button"
+          onClick={onUseUniversalTemplate}
+          style={{
+            background: 'transparent',
+            border: 'none',
+            padding: 0,
+            color: 'var(--ink-3)',
+            fontSize: 13,
+            cursor: 'pointer',
+            textDecoration: 'underline',
+            textDecorationStyle: 'dotted',
+            textUnderlineOffset: 4,
+            fontFamily: 'inherit',
+          }}
+        >
+          Don't see your brokerage? Use our universal template →
+        </button>
+      </div>
+
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 10, marginTop: 18 }}>
         {['Fidelity', 'Charles Schwab', 'JP Morgan', 'Human Interest'].map(b => (
           <div
             key={b}
             className="brokerage-card"
-            style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', textAlign: 'center', padding: 12, gap: 6 }}
+            style={{
+              display: 'flex',
+              flexDirection: 'column',
+              alignItems: 'center',
+              textAlign: 'center',
+              padding: 12,
+              gap: 6,
+            }}
           >
             <BrokerageLogo name={b} />
             <div className="brokerage-name" style={{ fontSize: 14 }}>
@@ -826,7 +884,7 @@ function AddAccountStep({
               <UploadRow
                 key={i}
                 upload={u}
-                suggestNames={suggestNames}
+                suggestNames={namesForRows[i] ?? []}
                 onName={n => setUploadName(i, n)}
                 onType={t => setUploadType(i, t)}
                 onRemove={() => removeUpload(i)}
@@ -948,21 +1006,38 @@ function DoneStep({
   uploads: OnboardingUpload[];
   onEnter: () => void;
 }) {
-  const goalYear = 2026 + Math.max(1, profile.retireAge - (2026 - profile.birthYear));
+  const nowYear = new Date().getFullYear();
+  const goalYear = nowYear + Math.max(1, profile.retireAge - (nowYear - profile.birthYear));
   const goalLabel =
-    goal >= 1_000_000 ? `$${(goal / 1_000_000).toFixed(goal >= 10_000_000 ? 0 : 1)}M` : `$${Math.round(goal / 1000)}K`;
+    goal >= 1_000_000
+      ? `$${(goal / 1_000_000).toFixed(goal >= 10_000_000 ? 0 : 1)}M`
+      : `$${Math.round(goal / 1000)}K`;
   const accountBlurb =
     uploads.length === 0
       ? 'No accounts yet. Add one from the sidebar whenever you are ready.'
       : uploads.length === 1
-      ? `${uploads[0].accountName} is in your portfolio.`
-      : `${uploads.length} accounts are in your portfolio.`;
+        ? `${uploads[0].accountName} is in your portfolio.`
+        : `${uploads.length} accounts are in your portfolio.`;
   return (
     <div className="ob-welcome">
       <div className="ob-welcome-glyph">
         <svg width="56" height="56" viewBox="0 0 56 56" fill="none">
-          <circle cx="28" cy="28" r="24" fill="var(--accent-soft)" stroke="var(--accent)" strokeWidth="1.25" />
-          <path d="M18 28 L25 35 L38 21" fill="none" stroke="var(--accent)" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />
+          <circle
+            cx="28"
+            cy="28"
+            r="24"
+            fill="var(--accent-soft)"
+            stroke="var(--accent)"
+            strokeWidth="1.25"
+          />
+          <path
+            d="M18 28 L25 35 L38 21"
+            fill="none"
+            stroke="var(--accent)"
+            strokeWidth="2.5"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
         </svg>
       </div>
       <div className="ob-welcome-eyebrow">You're set</div>
@@ -987,7 +1062,9 @@ function DoneStep({
         <div className="ob-step-eyebrow" style={{ marginBottom: 10 }}>
           What's next
         </div>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 8, fontSize: 13, color: 'var(--ink-2)' }}>
+        <div
+          style={{ display: 'flex', flexDirection: 'column', gap: 8, fontSize: 13, color: 'var(--ink-2)' }}
+        >
           <div>→ Drag more CSVs in, Vanguard, Schwab, your 401(k)</div>
           <div>→ Open the Planner and play with the sliders</div>
           <div>→ Find your milestones on the Achievements road</div>

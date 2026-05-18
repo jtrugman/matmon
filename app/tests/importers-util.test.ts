@@ -29,35 +29,38 @@ describe('parseNumber', () => {
 });
 
 describe('parseDate', () => {
+  // parseDate now builds Dates via Date.UTC so a CSV imported in UTC+10 at
+  // midnight doesn't shift to the previous calendar day in storage. Tests
+  // assert against UTC accessors for the same reason.
   it('parses ISO YYYY-MM-DD', () => {
     const d = parseDate('2024-08-15');
-    expect(d.getFullYear()).toBe(2024);
-    expect(d.getMonth()).toBe(7);
-    expect(d.getDate()).toBe(15);
+    expect(d.getUTCFullYear()).toBe(2024);
+    expect(d.getUTCMonth()).toBe(7);
+    expect(d.getUTCDate()).toBe(15);
   });
 
   it('parses US MM/DD/YYYY', () => {
     const d = parseDate('08/15/2024');
-    expect(d.getFullYear()).toBe(2024);
-    expect(d.getMonth()).toBe(7);
-    expect(d.getDate()).toBe(15);
+    expect(d.getUTCFullYear()).toBe(2024);
+    expect(d.getUTCMonth()).toBe(7);
+    expect(d.getUTCDate()).toBe(15);
   });
 
   it('parses MM/DD/YY with 2000s pivot for <50', () => {
     const d = parseDate('05/17/26');
-    expect(d.getFullYear()).toBe(2026);
+    expect(d.getUTCFullYear()).toBe(2026);
   });
 
   it('parses MM/DD/YY with 1900s pivot for >=50', () => {
     const d = parseDate('05/17/95');
-    expect(d.getFullYear()).toBe(1995);
+    expect(d.getUTCFullYear()).toBe(1995);
   });
 
   it('parses MM-DD-YYYY dashes', () => {
     const d = parseDate('11-09-2023');
-    expect(d.getMonth()).toBe(10);
-    expect(d.getDate()).toBe(9);
-    expect(d.getFullYear()).toBe(2023);
+    expect(d.getUTCMonth()).toBe(10);
+    expect(d.getUTCDate()).toBe(9);
+    expect(d.getUTCFullYear()).toBe(2023);
   });
 
   it('falls back to Date constructor for other formats', () => {
@@ -68,6 +71,14 @@ describe('parseDate', () => {
   it('returns Invalid Date for empty/null', () => {
     expect(isNaN(+parseDate(''))).toBe(true);
     expect(isNaN(+parseDate(null))).toBe(true);
+  });
+
+  it('does not drift across timezones (uses Date.UTC)', () => {
+    // Regression: the previous local-tz `new Date(y, m-1, d)` could place
+    // 2024-01-01 on Dec 31 2023 for users in UTC+10. Compare against the
+    // explicit UTC timestamp to lock the behavior.
+    const d = parseDate('2024-01-01');
+    expect(+d).toBe(Date.UTC(2024, 0, 1));
   });
 });
 

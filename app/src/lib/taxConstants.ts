@@ -71,8 +71,7 @@ export const TAX_CONSTANTS_2026: TaxConstants = {
     // Fidelity 2024 Retiree Health Care Cost Estimate, opposite-sex couple, both 65.
     // Note: the prior PlannerView hardcoded $330,000, which is 2 x $165,000.
     fidelityRetireeEstimateCouple: 330000,
-    sourceUrl:
-      'https://www.fidelity.com/viewpoints/personal-finance/plan-for-rising-health-care-costs',
+    sourceUrl: 'https://www.fidelity.com/viewpoints/personal-finance/plan-for-rising-health-care-costs',
     asOfYear: 2024,
   },
   irmaa: {

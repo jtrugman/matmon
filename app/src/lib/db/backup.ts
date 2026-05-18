@@ -50,6 +50,64 @@ export type BackupPayloadWithCsvs = BackupPayload & {
 
 // ── Internal table helpers ───────────────────────────────────
 
+// Per-table column allowlist derived from the SQL schema (see ./schema.ts).
+// Column NAMES sit in identifier position, so they cannot be bound as
+// parameters; the only safe way to interpolate them is to validate them
+// against a fixed whitelist. Any key in a backup row that isn't on this list
+// is silently dropped on import (so a malicious export can't smuggle in a SQL
+// fragment via a crafted column name). VALUES are always bound with `?` so
+// they're already safe.
+export const TABLE_COLUMNS: Record<BackupTable, readonly string[]> = {
+  accounts: ['id', 'name', 'brokerage', 'account_type', 'currency', 'created_at'],
+  transactions: [
+    'id',
+    'account_id',
+    'date',
+    'symbol',
+    'action',
+    'quantity',
+    'price',
+    'fees',
+    'amount',
+    'currency',
+    'notes',
+    'imported_from',
+  ],
+  prices: ['symbol', 'date', 'close', 'currency', 'fetched_at'],
+  symbol_metadata: ['symbol', 'name', 'asset_class', 'currency', 'last_split_date'],
+  achievements: ['id', 'milestone_key', 'unlocked_at', 'context_json'],
+  scenarios: ['id', 'name', 'inputs_json', 'created_at', 'updated_at'],
+  user_profile: [
+    'id',
+    'name',
+    'birth_year',
+    'target_retirement_age',
+    'expected_retirement_income',
+    'household_size',
+  ],
+  tax_constants: ['year', 'key', 'value', 'notes'],
+  settings: ['key', 'value'],
+};
+
+const TABLE_COLUMN_SETS: Record<BackupTable, Set<string>> = Object.fromEntries(
+  (Object.entries(TABLE_COLUMNS) as [BackupTable, readonly string[]][]).map(([k, v]) => [k, new Set(v)]),
+) as Record<BackupTable, Set<string>>;
+
+/**
+ * Filter a row to only the columns we know belong to the given table. Keys
+ * that don't appear on the schema allowlist are dropped; this is the SQL
+ * injection guard for the column-name identifier position on the Tauri path
+ * AND a defense-in-depth filter for the browser shim path.
+ */
+function sanitizeRow(name: BackupTable, row: Record<string, unknown>): Record<string, unknown> {
+  const allow = TABLE_COLUMN_SETS[name];
+  const out: Record<string, unknown> = {};
+  for (const k of Object.keys(row)) {
+    if (allow.has(k)) out[k] = row[k];
+  }
+  return out;
+}
+
 async function readTable(name: BackupTable): Promise<unknown[]> {
   await init();
   const drv = await getDriver();
@@ -63,22 +121,24 @@ async function writeTable(name: BackupTable, rows: unknown[]): Promise<void> {
   await init();
   const drv = await getDriver();
   if (!isTauri()) {
-    (drv as any).tableWrite(name, rows);
+    // Sanitize on the browser shim too, so a malicious payload can't smuggle
+    // unexpected keys into the in-memory rows that later round-trip back out.
+    const sanitized = (rows as Record<string, unknown>[]).map(r => sanitizeRow(name, r));
+    (drv as any).tableWrite(name, sanitized);
     return;
   }
-  // Tauri path: clear, then bulk-insert. We use a parameterised generic insert
-  // because each table has a different column set; column names come from row keys.
+  // Tauri path: clear, then bulk-insert. Column NAMES are identifiers and
+  // cannot be parameter-bound, so we intersect each row's keys with the
+  // per-table allowlist before interpolating. VALUES are always bound.
   await drv.exec(`DELETE FROM ${name}`);
   await drv.transaction(async tx => {
-    for (const row of rows as Record<string, unknown>[]) {
+    for (const rawRow of rows as Record<string, unknown>[]) {
+      const row = sanitizeRow(name, rawRow);
       const cols = Object.keys(row);
       if (cols.length === 0) continue;
       const placeholders = cols.map(() => '?').join(', ');
       const values = cols.map(c => row[c]);
-      await tx.exec(
-        `INSERT INTO ${name} (${cols.join(', ')}) VALUES (${placeholders})`,
-        values,
-      );
+      await tx.exec(`INSERT INTO ${name} (${cols.join(', ')}) VALUES (${placeholders})`, values);
     }
   });
 }
@@ -177,10 +237,7 @@ export async function buildCsvs(): Promise<Record<string, string>> {
   const csvs: Record<string, string> = {};
   for (const acct of accounts) {
     const txs = await listTransactions(acct.id);
-    csvs[`${acct.id}.csv`] = rowsToCsv(
-      txs as unknown as Record<string, unknown>[],
-      TX_COLUMNS as string[],
-    );
+    csvs[`${acct.id}.csv`] = rowsToCsv(txs as unknown as Record<string, unknown>[], TX_COLUMNS as string[]);
   }
   return csvs;
 }
@@ -240,7 +297,12 @@ export async function importBackupFromPayload(
   for (const name of BACKUP_TABLES) {
     const rows = (payload.tables[name] || []) as unknown[];
     if (name === 'accounts' && !isTauri()) {
-      for (const r of rows as AccountRow[]) {
+      // Sanitize each row against the accounts column allowlist before
+      // handing it to insertAccount. The browser shim persists rows
+      // verbatim, so without this, smuggled keys would survive a backup
+      // round-trip.
+      for (const raw of rows as Record<string, unknown>[]) {
+        const r = sanitizeRow('accounts', raw) as AccountRow;
         await insertAccount(r);
       }
     } else if (name === 'transactions' && !isTauri()) {
@@ -259,7 +321,10 @@ export async function importBackupFromPayload(
           amount: r.amount,
           currency: r.currency,
           notes: r.notes ?? '',
-          rawHash: r.imported_from ?? `restored-${r.id}`,
+          // Include account_id in the fallback hash so two sequential restores
+          // (which both walk autoincrement ids starting at 1) can't collide on
+          // their `restored-<id>` fallbacks across different accounts.
+          rawHash: r.imported_from ?? `restored-${r.account_id}-${r.id}`,
         });
         byAccount.set(r.account_id, list);
       }
@@ -276,9 +341,7 @@ export async function importBackupFromPayload(
   return { tablesRestored, rowCount };
 }
 
-export async function importBackup(
-  file: File,
-): Promise<{ tablesRestored: string[]; rowCount: number }> {
+export async function importBackup(file: File): Promise<{ tablesRestored: string[]; rowCount: number }> {
   const text = await file.text();
   let parsed: unknown;
   try {

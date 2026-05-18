@@ -20,6 +20,25 @@ export function isOffline() {
   return offline;
 }
 
-export type { Quote, HistoricalPoint, QuoteProvider, NetworkLogEntry } from './types';
+export type {
+  Quote,
+  HistoricalPoint,
+  QuoteProvider,
+  NetworkLogEntry,
+  FetchQuotesOptions,
+} from './types';
 export { networkLog } from './log';
 export { yahooProvider, clearQuoteCache } from './yahoo';
+export { fetchHistoricalDaily, type HistoricalBar } from './history';
+export {
+  backfillHistoricalPrices,
+  filterBackfillSymbols,
+  type BackfillOptions,
+  type BackfillResult,
+} from './backfill';
+export {
+  fetchInstrumentSector,
+  backfillInstruments,
+  type InstrumentProfile,
+  type BackfillInstrumentsResult,
+} from './sector';

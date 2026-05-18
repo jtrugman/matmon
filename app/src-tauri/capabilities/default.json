@@ -26,9 +26,7 @@
       "identifier": "http:allow-fetch",
       "allow": [
         { "url": "https://query1.finance.yahoo.com/*" },
-        { "url": "https://query2.finance.yahoo.com/*" },
-        { "url": "https://www.alphavantage.co/*" },
-        { "url": "https://finnhub.io/*" }
+        { "url": "https://img.logo.dev/*" }
       ]
     }
   ]

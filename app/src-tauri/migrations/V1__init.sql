@@ -82,3 +82,11 @@ CREATE TABLE IF NOT EXISTS settings (
   key   TEXT PRIMARY KEY,
   value TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS ticker_logos (
+  ticker      TEXT PRIMARY KEY,
+  logo_data   BLOB,
+  logo_format TEXT NOT NULL DEFAULT 'png',
+  fetched_at  TEXT NOT NULL,
+  status      TEXT NOT NULL DEFAULT 'ok'
+);

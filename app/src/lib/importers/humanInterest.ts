@@ -13,7 +13,9 @@ export const humanInterestImporter: BrokerageImporter = {
     const h = headers.map(x => x.toLowerCase());
     const hasFund = h.some(x => x.includes('fund') || x.includes('investment'));
     const hasShares = h.includes('shares') || h.includes('units');
-    const hasContrib = h.some(x => x.includes('employee contribution') || x.includes('employer contribution'));
+    const hasContrib = h.some(
+      x => x.includes('employee contribution') || x.includes('employer contribution'),
+    );
     if (hasFund && hasShares && hasContrib) return true;
     // Looser: any row containing "Human Interest" branding
     return JSON.stringify(firstRow).toLowerCase().includes('human interest');
@@ -34,7 +36,10 @@ export const humanInterestImporter: BrokerageImporter = {
       const price = parseNumber(row['Unit Price'] || row['Price'] || row['NAV']);
       if (!symbol || shares <= 0) continue;
 
-      const date = parseDate(row['As Of'] || row['Date'] || '') || today;
+      // parseDate always returns a Date (NaN-valued when the source string is
+      // missing/unparseable), so the next-line isNaN check is what actually
+      // handles fall-through to today. The old `|| today` never fired.
+      const date = parseDate(row['As Of'] || row['Date'] || '');
       const useDate = isNaN(+date) ? today : date;
       symbols.add(symbol);
       if (!minDate || useDate < minDate) minDate = useDate;

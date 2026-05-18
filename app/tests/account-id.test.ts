@@ -7,15 +7,13 @@ describe('slugifyAccountId', () => {
   });
 
   it('appends -2 on first collision', () => {
-    expect(slugifyAccountId('Fidelity Taxable', 'Fidelity', ['fidelity-taxable'])).toBe(
-      'fidelity-taxable-2',
-    );
+    expect(slugifyAccountId('Fidelity Taxable', 'Fidelity', ['fidelity-taxable'])).toBe('fidelity-taxable-2');
   });
 
   it('appends -3 when -2 is also taken', () => {
-    expect(
-      slugifyAccountId('Fidelity Taxable', 'Fidelity', ['fidelity-taxable', 'fidelity-taxable-2']),
-    ).toBe('fidelity-taxable-3');
+    expect(slugifyAccountId('Fidelity Taxable', 'Fidelity', ['fidelity-taxable', 'fidelity-taxable-2'])).toBe(
+      'fidelity-taxable-3',
+    );
   });
 
   it('skips over occupied numeric suffixes', () => {
@@ -29,7 +27,7 @@ describe('slugifyAccountId', () => {
     ).toBe('fidelity-taxable-5');
   });
 
-  it("cleans apostrophes, ampersands, and slashes into dashes", () => {
+  it('cleans apostrophes, ampersands, and slashes into dashes', () => {
     expect(slugifyAccountId("Justin's Taxable", 'Fidelity', [])).toBe('justin-s-taxable');
     expect(slugifyAccountId('Mom & Dad Joint', 'Schwab', [])).toBe('mom-dad-joint');
     expect(slugifyAccountId('Roth/IRA', 'Vanguard', [])).toBe('roth-ira');

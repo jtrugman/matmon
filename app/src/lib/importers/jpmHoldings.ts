@@ -84,6 +84,13 @@ export const jpmHoldingsImporter: BrokerageImporter = {
     let minDate: Date | null = null;
     let maxDate: Date | null = null;
 
+    // Track the most-recent (by Pricing Date) market price seen per ticker. The
+    // JPM positions export repeats the same Price + Pricing Date on every lot
+    // for a given symbol, but we still pick the newest just in case different
+    // lot rows disagree (e.g. multi-day exports). One entry per unique ticker
+    // is what downstream consumers want.
+    const marketPriceBySymbol = new Map<string, { price: number; asOf: Date }>();
+
     // Multi-account bucket: keyed by "${Account name}::${Account number}".
     const accountBuckets = new Map<
       string,
@@ -126,6 +133,28 @@ export const jpmHoldingsImporter: BrokerageImporter = {
       if (!minDate || date < minDate) minDate = date;
       if (!maxDate || date > maxDate) maxDate = date;
 
+      // Capture the current market price for this symbol. JPM exports the live
+      // mark in the "Price" column and the timestamp in "Pricing Date" (which
+      // is usually "MM/DD/YYYY HH:MM:SS"). We keep the newest entry per symbol
+      // so the portfolio layer can value the position at market, not at cost.
+      const marketPrice = parseNumber(row['Price']);
+      if (marketPrice > 0) {
+        const pricingDateStr = (row['Pricing Date'] || '').trim();
+        // parseDate handles "MM/DD/YYYY ..." (it stops at the slash separator).
+        // If unparseable, fall back to "today" so we still get a usable entry.
+        let asOf: Date;
+        if (pricingDateStr) {
+          const parsed = parseDate(pricingDateStr);
+          asOf = isNaN(+parsed) ? today : parsed;
+        } else {
+          asOf = today;
+        }
+        const existing = marketPriceBySymbol.get(ticker);
+        if (!existing || asOf >= existing.asOf) {
+          marketPriceBySymbol.set(ticker, { price: marketPrice, asOf });
+        }
+      }
+
       const tx: ParsedTransaction = {
         date,
         symbol: ticker,
@@ -139,13 +168,7 @@ export const jpmHoldingsImporter: BrokerageImporter = {
         amount: -(quantity * unitCost),
         currency: 'USD',
         notes: description ? `${description} (lot import)` : 'JP Morgan position lot import',
-        rawHash: rowHash([
-          accountNumber,
-          ticker,
-          acquisitionDateStr,
-          quantity,
-          unitCost,
-        ]),
+        rawHash: rowHash([accountNumber, ticker, acquisitionDateStr, quantity, unitCost]),
       };
       txs.push(tx);
 
@@ -169,17 +192,28 @@ export const jpmHoldingsImporter: BrokerageImporter = {
         key,
         name: bucket.name,
         accountNumber: bucket.accountNumber,
+        last4: lastFourOf(bucket.accountNumber),
         accountTypeHint: guessAccountType(bucket.name, bucket.acctType),
         transactions: bucket.transactions,
       }));
     }
 
-    // Single-account files still report a sensible accountType inference.
+    // Single-account files still report a sensible accountType inference and
+    // also carry the detected account number through so upsertAccountByFingerprint
+    // can dedupe re-imports of the same single-account positions file.
     let inferredType: AccountTypeId | 'unknown' = 'unknown';
+    let inferAccountNumber = '';
     if (accountBuckets.size === 1) {
       const only = Array.from(accountBuckets.values())[0];
       inferredType = guessAccountType(only.name, only.acctType);
+      inferAccountNumber = only.accountNumber || '';
     }
+
+    const marketPrices = Array.from(marketPriceBySymbol.entries()).map(([symbol, v]) => ({
+      symbol,
+      price: v.price,
+      asOf: v.asOf,
+    }));
 
     return {
       inferences: {
@@ -191,10 +225,23 @@ export const jpmHoldingsImporter: BrokerageImporter = {
         uniqueSymbols: symbols.size,
         actionsMapped: txs.length,
         actionsUnknown: 0,
+        accountNumber: inferAccountNumber,
+        last4: lastFourOf(inferAccountNumber),
       },
       transactions: txs,
       unmappedActionStrings: [],
       ...(accountsDetected ? { accountsDetected } : {}),
+      ...(marketPrices.length > 0 ? { marketPrices } : {}),
     };
   },
 };
+
+/**
+ * Trailing 4-digit window of an account number (e.g. "XXXX1234" -> "1234").
+ * Returns the empty string when the input has fewer than 4 digits or is missing.
+ */
+function lastFourOf(accountNumber: string | undefined): string {
+  if (!accountNumber) return '';
+  const digits = accountNumber.replace(/\D/g, '');
+  return digits.slice(-4);
+}

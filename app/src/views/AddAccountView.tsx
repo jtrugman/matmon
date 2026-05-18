@@ -3,9 +3,16 @@ import Papa from 'papaparse';
 import { PageHead } from '../components/PageHead';
 import { BrokerageLogo } from '../components/BrokerageLogo';
 import { importCsv, parseWithColumnMap, type ColumnMap } from '../lib/importers';
-import { insertAccount, insertTransactions, listAccounts } from '../lib/db/repos';
-import { leaveDemoMode } from '../lib/db/seed';
+import {
+  insertTransactions,
+  listAccounts,
+  upsertAccountByFingerprint,
+  upsertPrice,
+} from '../lib/db/repos';
 import { slugifyAccountId } from '../lib/db/accountId';
+import { prefetchLogos } from '../lib/logos';
+import { pickFunNames } from '../lib/funNames';
+import { backfillHistoricalPrices, filterBackfillSymbols } from '../lib/quotes/backfill';
 import type { DetectedAccount, ImporterResult, ParsedTransaction } from '../lib/importers/types';
 
 const COLUMN_MAP_STORAGE_KEY = 'matmon.columnMaps.v1';
@@ -18,8 +25,18 @@ type ColumnMapField = {
 };
 
 const COLUMN_MAP_FIELDS: ColumnMapField[] = [
-  { key: 'date', label: 'Date', required: true, hints: ['date', 'trade date', 'run date', 'as of', 'settle'] },
-  { key: 'action', label: 'Action', required: true, hints: ['action', 'transaction', 'type', 'activity', 'kind'] },
+  {
+    key: 'date',
+    label: 'Date',
+    required: true,
+    hints: ['date', 'trade date', 'run date', 'as of', 'settle'],
+  },
+  {
+    key: 'action',
+    label: 'Action',
+    required: true,
+    hints: ['action', 'transaction', 'type', 'activity', 'kind'],
+  },
   { key: 'symbol', label: 'Symbol', required: false, hints: ['symbol', 'ticker', 'security'] },
   { key: 'quantity', label: 'Quantity', required: false, hints: ['quantity', 'qty', 'shares', 'units'] },
   { key: 'price', label: 'Price', required: false, hints: ['price', 'unit price', 'per share'] },
@@ -81,18 +98,6 @@ function autoGuessMap(headers: string[]): Partial<ColumnMap> {
   return guess;
 }
 
-const FUN_NAMES = ['The Lighthouse', 'The Roost', 'The Greenhouse', 'The Workshop', 'The Hatch', 'The Annex'];
-
-const SAMPLE_FIDELITY_CSV = `Run Date,Action,Symbol,Description,Quantity,Price ($),Amount ($)
-05/02/2026,DIVIDEND RECEIVED,AAPL,APPLE INC,,,104.30
-04/29/2026,YOU BOUGHT,VOO,VANGUARD S&P 500 ETF,4,556.18,-2224.72
-04/26/2026,REINVESTMENT,BND,VANGUARD TOTAL BOND,0.214,72.94,-15.62
-04/22/2026,YOU SOLD,JEPI,JPM EQUITY PREMIUM INCOME ETF,30,61.84,1855.20
-04/15/2026,DIVIDEND RECEIVED,VTI,VANGUARD TOTAL STOCK MKT ETF,,,1620.42
-03/14/2026,YOU BOUGHT,MSFT,MICROSOFT CORP,5,502.60,-2513.00
-02/21/2026,DIVIDEND RECEIVED,VTI,VANGUARD TOTAL STOCK MKT ETF,,,1480.10
-01/18/2026,YOU BOUGHT,VTI,VANGUARD TOTAL STOCK MKT ETF,8,314.10,-2512.80`;
-
 const ACCOUNT_TYPE_OPTIONS = [
   { id: 'taxable', label: 'Taxable brokerage' },
   { id: 'trad_ira', label: 'Traditional IRA' },
@@ -102,11 +107,44 @@ const ACCOUNT_TYPE_OPTIONS = [
   { id: 'other', label: 'Other' },
 ];
 
+/** Pull the trailing 4-digit window from a brokerage account number that may
+ *  be presented as "...2180", "XXXX-1234", or a plain integer. Returns the
+ *  empty string when the input has fewer than 4 digits or is missing. */
+function lastFour(accountNumber?: string): string {
+  if (!accountNumber) return '';
+  const digits = accountNumber.replace(/\D/g, '');
+  return digits.slice(-4);
+}
+
+/** Canonical default account name. For multi-account picks we know the
+ *  detected name + account number, so we build "1234 JP Morgan
+ *  Self-Directed-Ret". For single-account uploads (or column-mapper flows) we
+ *  fall back to "<Brokerage> <Type label>" since no account number is known. */
+function canonicalAccountName(
+  brokerage: string,
+  accountType: string,
+  detectedName?: string,
+  accountNumber?: string,
+): string {
+  if (detectedName) {
+    const last4 = lastFour(accountNumber);
+    return [last4, brokerage, detectedName].filter(Boolean).join(' ').trim();
+  }
+  return `${brokerage} ${labelFor(accountType)}`.trim();
+}
+
 type Reviewing = {
   fileName: string;
   csvText: string;
   result: ImporterResult;
   importerId: string | null;
+  /** When the review step was reached by picking one account out of a
+   *  multi-account file, we keep the brokerage-assigned account number and the
+   *  detected name around so the canonical default ("1234 JP Morgan
+   *  Self-Directed-Ret") can include the last-4 disambiguator. Undefined for
+   *  single-account files and column-mapper flows. */
+  detectedName?: string;
+  accountNumber?: string;
 };
 
 type Mapping = {
@@ -126,13 +164,33 @@ type MultiAccountPicker = {
   brokerage: string;
   importerId: string | null;
   accounts: DetectedAccount[];
+  /** File-level market prices (JPM positions exports surface these). Shared
+   *  across every account in the multi-account file. */
+  marketPrices?: Array<{ symbol: string; price: number; asOf: Date }>;
 };
 
-export function AddAccountView({ prefillBrokerage }: { prefillBrokerage?: string } = {}) {
+export function AddAccountView({
+  prefillBrokerage: _prefillBrokerage,
+  onReloadPortfolio,
+  onUseUniversalTemplate,
+}: {
+  prefillBrokerage?: string;
+  onReloadPortfolio?: () => void | Promise<void>;
+  /** Navigate to the dedicated Universal Template page. The Add Account view
+   *  surfaces this through the "Don't see your brokerage?" link beside the
+   *  primary dropzone. Undefined in isolated tests; the link is hidden when
+   *  not provided. */
+  onUseUniversalTemplate?: () => void;
+} = {}) {
   const [step, setStep] = useState<'drop' | 'map' | 'pickAccounts' | 'review' | 'done'>('drop');
   const [customName, setCustomName] = useState('');
-  const [selectedFunName, setSelectedFunName] = useState('The Lighthouse');
-  const [nameMode, setNameMode] = useState<'fun' | 'custom' | 'default'>('fun');
+  // The first suggestion in the shuffled set so the initial UI doesn't show a
+  // pill that isn't in the rendered list.
+  const funNames = useMemo(() => pickFunNames(Date.now() % 9973, 5), []);
+  const [selectedFunName, setSelectedFunName] = useState(funNames[0]);
+  // Default to 'default' (the canonical brokerage+type name) so a single click
+  // on Add gets the user a perfectly reasonable account name without typing.
+  const [nameMode, setNameMode] = useState<'fun' | 'custom' | 'default'>('default');
   const [dragging, setDragging] = useState(false);
   const [reviewing, setReviewing] = useState<Reviewing | null>(null);
   const [mapping, setMapping] = useState<Mapping | null>(null);
@@ -144,7 +202,17 @@ export function AddAccountView({ prefillBrokerage }: { prefillBrokerage?: string
   const [multiAccount, setMultiAccount] = useState<MultiAccountPicker | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const techName = reviewing ? `${reviewing.result.inferences.brokerage} ${labelFor(accountType)}` : 'Fidelity Taxable';
+  // Canonical default name uses the detected account number (last 4) when the
+  // review step was reached via the multi-account picker. Falls back to
+  // "<Brokerage> <Type label>" for single-account / column-mapper flows.
+  const techName = reviewing
+    ? canonicalAccountName(
+        reviewing.result.inferences.brokerage,
+        accountType,
+        reviewing.detectedName,
+        reviewing.accountNumber,
+      )
+    : canonicalAccountName('Fidelity', accountType);
   const finalName =
     nameMode === 'custom' ? customName || '(Untitled)' : nameMode === 'default' ? techName : selectedFunName;
 
@@ -189,6 +257,7 @@ export function AddAccountView({ prefillBrokerage }: { prefillBrokerage?: string
         brokerage: result.inferences.brokerage,
         importerId: result.importerId,
         accounts: result.accountsDetected,
+        ...(result.marketPrices ? { marketPrices: result.marketPrices } : {}),
       });
       setStep('pickAccounts');
       return;
@@ -217,12 +286,21 @@ export function AddAccountView({ prefillBrokerage }: { prefillBrokerage?: string
       },
       transactions: detected.transactions,
       unmappedActionStrings: [],
+      // Carry the file-level market prices through so confirmImport can
+      // persist them even when the user picks a single account out of a
+      // multi-account JPM positions file.
+      ...(multiAccount.marketPrices ? { marketPrices: multiAccount.marketPrices } : {}),
     };
     setReviewing({
       fileName: `${multiAccount.fileName} (${detected.name})`,
       csvText: multiAccount.csvText,
       result: subset,
       importerId: multiAccount.importerId,
+      // Carry the picked account's identifying info through to the review
+      // step. The canonical "<last4> <brokerage> <name>" default and the
+      // upsertAccountByFingerprint dedupe both rely on accountNumber.
+      detectedName: detected.name,
+      accountNumber: detected.accountNumber,
     });
     if (detected.accountTypeHint !== 'unknown') setAccountType(detected.accountTypeHint);
     // Auto-name from brokerage + account type so the user can just confirm.
@@ -238,7 +316,6 @@ export function AddAccountView({ prefillBrokerage }: { prefillBrokerage?: string
     setImportStatus(`Saving ${multiAccount.accounts.length} accounts…`);
     let totalInserted = 0;
     let totalSkipped = 0;
-    await leaveDemoMode();
     // Snapshot existing IDs once; extend locally so multiple new accounts in
     // this batch dedupe against each other too.
     const existingIds: string[] = [];
@@ -249,21 +326,75 @@ export function AddAccountView({ prefillBrokerage }: { prefillBrokerage?: string
       /* worst case we just dedupe against [] */
     }
     for (const acc of multiAccount.accounts) {
-      const autoName = `${multiAccount.brokerage} ${acc.name}`.trim();
-      const id = slugifyAccountId(autoName, multiAccount.brokerage, existingIds);
+      const last4 = acc.last4 || lastFour(acc.accountNumber);
+      // Build the canonical auto-name with the last4 prefix so identically
+      // named accounts (e.g. two "Self-Directed" JPM accounts that only differ
+      // by last4) get distinct human-readable rows. This also doubles as the
+      // recovery hook for upsertAccountByFingerprint: lastFourFromName(name)
+      // pulls the digit token back out so a future re-import matches the
+      // existing row even though we don't persist last4 as a column.
+      const autoName = [last4, multiAccount.brokerage, acc.name]
+        .filter(Boolean)
+        .join(' ')
+        .trim();
+      const desiredId = slugifyAccountId(autoName, multiAccount.brokerage, existingIds);
+      // upsertAccountByFingerprint collapses re-imports of the same brokerage
+      // account back onto the canonical row. For a multi-account file imported
+      // twice in a row, the second pass returns the canonical IDs and the
+      // rowHash dedupe inside insertTransactions skips every row.
+      const { id } = await upsertAccountByFingerprint(
+        {
+          id: desiredId,
+          name: autoName,
+          brokerage: multiAccount.brokerage,
+          account_type: acc.accountTypeHint === 'unknown' ? 'other' : acc.accountTypeHint,
+          currency: 'USD',
+          created_at: new Date().toISOString(),
+        },
+        last4,
+      );
       existingIds.push(id);
-      await insertAccount({
-        id,
-        name: autoName,
-        brokerage: multiAccount.brokerage,
-        account_type: acc.accountTypeHint === 'unknown' ? 'other' : acc.accountTypeHint,
-        currency: 'USD',
-        created_at: new Date().toISOString(),
-      });
       const counts = await insertTransactions(id, acc.transactions);
       totalInserted += counts.inserted;
       totalSkipped += counts.skipped;
     }
+    // Market prices are file-level and shared across every account in the
+    // multi-account import, so we upsert them once at the end. upsertPrice is
+    // idempotent in (symbol, date), so the loop is safe to re-run.
+    if (multiAccount.marketPrices && multiAccount.marketPrices.length > 0) {
+      for (const mp of multiAccount.marketPrices) {
+        try {
+          await upsertPrice(mp.symbol, mp.asOf, mp.price);
+        } catch {
+          /* one bad price shouldn't block the rest of the import */
+        }
+      }
+    }
+    // Best-effort logo prefetch across every ticker we just imported.
+    const tickers: string[] = [];
+    let earliestTxDate = new Date();
+    for (const acc of multiAccount.accounts) {
+      for (const t of acc.transactions) {
+        if (t.symbol) tickers.push(t.symbol);
+        if (t.date < earliestTxDate) earliestTxDate = t.date;
+      }
+    }
+    if (tickers.length > 0) void prefetchLogos(tickers);
+
+    // Backfill historical daily closes. Same rationale as the single-account
+    // path: blocking here means the post-import chart shows real values.
+    const backfillSymbols = filterBackfillSymbols(tickers);
+    if (backfillSymbols.length > 0) {
+      setImportStatus(
+        `Saved ${multiAccount.accounts.length} accounts. Imported ${totalInserted} transactions, skipped ${totalSkipped} duplicates. Fetching price history…`,
+      );
+      try {
+        await backfillHistoricalPrices(backfillSymbols, earliestTxDate);
+      } catch (e) {
+        console.error('[matmon] price backfill threw during import', e);
+      }
+    }
+
     setImportStatus(
       `Saved ${multiAccount.accounts.length} accounts. Imported ${totalInserted} transactions, skipped ${totalSkipped} duplicates.`,
     );
@@ -295,10 +426,6 @@ export function AddAccountView({ prefillBrokerage }: { prefillBrokerage?: string
     setStep('review');
   }
 
-  function loadSample() {
-    handleCsv(SAMPLE_FIDELITY_CSV, 'sample-fidelity.csv');
-  }
-
   function onFile(file: File) {
     file.text().then(t => handleCsv(t, file.name));
   }
@@ -313,18 +440,66 @@ export function AddAccountView({ prefillBrokerage }: { prefillBrokerage?: string
     } catch {
       /* worst case we just dedupe against [] */
     }
-    const id = slugifyAccountId(finalName, reviewing.result.inferences.brokerage, existingIds);
-    await leaveDemoMode();
-    await insertAccount({
-      id,
-      name: finalName,
-      brokerage: reviewing.result.inferences.brokerage,
-      account_type: accountType,
-      currency: reviewing.result.inferences.currency,
-      created_at: new Date().toISOString(),
-    });
+    const desiredId = slugifyAccountId(finalName, reviewing.result.inferences.brokerage, existingIds);
+    // last4 is the canonical fingerprint we dedupe on. It comes from the
+    // multi-account picker (reviewing.accountNumber) when the user drilled into
+    // one specific account, otherwise from the importer's single-account
+    // inference (reviewing.result.inferences.last4).
+    const last4 =
+      lastFour(reviewing.accountNumber) || (reviewing.result.inferences.last4 ?? '');
+    const { id } = await upsertAccountByFingerprint(
+      {
+        id: desiredId,
+        name: finalName,
+        brokerage: reviewing.result.inferences.brokerage,
+        account_type: accountType,
+        currency: reviewing.result.inferences.currency,
+        created_at: new Date().toISOString(),
+      },
+      last4,
+    );
     const counts = await insertTransactions(id, reviewing.result.transactions);
-    setImportStatus(`Saved ${finalName}. Imported ${counts.inserted} new transactions, skipped ${counts.skipped} duplicates.`);
+    // Persist any market prices the importer attached (e.g. JPM positions).
+    // This is what lets the portfolio aggregator value the position at market
+    // instead of falling back to the cost-basis price embedded in each lot's
+    // synthesized transfer_in transaction.
+    if (reviewing.result.marketPrices && reviewing.result.marketPrices.length > 0) {
+      for (const mp of reviewing.result.marketPrices) {
+        try {
+          await upsertPrice(mp.symbol, mp.asOf, mp.price);
+        } catch {
+          /* a single bad price shouldn't block the import */
+        }
+      }
+    }
+    // Background-fetch logos for every ticker in this import. Skipped if a
+    // logo for a given ticker is already cached.
+    const tickers = reviewing.result.transactions.map(t => t.symbol).filter((s): s is string => Boolean(s));
+    if (tickers.length > 0) void prefetchLogos(tickers);
+
+    // Backfill historical daily closes for every symbol so the per-holding
+    // chart and the portfolio NAV chart both have real mark-to-market
+    // history to draw. We AWAIT so the "Reload to see it" CTA lands on a
+    // populated chart instead of a flat line that fills in seconds later.
+    const backfillSymbols = filterBackfillSymbols(tickers);
+    if (backfillSymbols.length > 0) {
+      let earliest = new Date();
+      for (const t of reviewing.result.transactions) {
+        if (t.date < earliest) earliest = t.date;
+      }
+      setImportStatus(
+        `Saved ${finalName}. Imported ${counts.inserted} new, skipped ${counts.skipped} duplicates. Fetching price history…`,
+      );
+      try {
+        await backfillHistoricalPrices(backfillSymbols, earliest);
+      } catch (e) {
+        console.error('[matmon] price backfill threw during import', e);
+      }
+    }
+
+    setImportStatus(
+      `Saved ${finalName}. Imported ${counts.inserted} new transactions, skipped ${counts.skipped} duplicates.`,
+    );
     setStep('done');
   }
 
@@ -462,7 +637,16 @@ export function AddAccountView({ prefillBrokerage }: { prefillBrokerage?: string
               }}
             />
             <div className="dropzone-glyph">
-              <svg width="48" height="48" viewBox="0 0 48 48" fill="none" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" strokeLinejoin="round">
+              <svg
+                width="48"
+                height="48"
+                viewBox="0 0 48 48"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.25"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
                 <path d="M24 30V8" />
                 <path d="M14 18l10-10 10 10" />
                 <path d="M8 32v6a2 2 0 0 0 2 2h28a2 2 0 0 0 2-2v-6" />
@@ -472,17 +656,39 @@ export function AddAccountView({ prefillBrokerage }: { prefillBrokerage?: string
             <div className="dropzone-sub">
               Or click to browse. Your file is read locally and never leaves this machine.
             </div>
-            <button
-              className="btn btn-primary"
-              style={{ marginTop: 18 }}
-              onClick={e => {
-                e.stopPropagation();
-                loadSample();
+          </div>
+
+          {onUseUniversalTemplate && (
+            <div
+              data-testid="universal-template-link"
+              style={{
+                marginTop: 14,
+                display: 'flex',
+                justifyContent: 'center',
+                fontSize: 13,
+                color: 'var(--ink-3)',
               }}
             >
-              Use a sample CSV
-            </button>
-          </div>
+              <button
+                type="button"
+                onClick={onUseUniversalTemplate}
+                style={{
+                  background: 'transparent',
+                  border: 'none',
+                  padding: 0,
+                  color: 'var(--ink-3)',
+                  fontSize: 13,
+                  cursor: 'pointer',
+                  textDecoration: 'underline',
+                  textDecorationStyle: 'dotted',
+                  textUnderlineOffset: 4,
+                  fontFamily: 'inherit',
+                }}
+              >
+                Don't see your brokerage? Use our universal template →
+              </button>
+            </div>
+          )}
 
           <div className="card" style={{ marginTop: 18 }}>
             <div className="card-title-row">
@@ -498,7 +704,11 @@ export function AddAccountView({ prefillBrokerage }: { prefillBrokerage?: string
                 { name: 'JP Morgan', note: 'Self-Directed & Wealth.' },
                 { name: 'Human Interest', note: '401(k) · holdings-only OK.' },
               ].map(b => (
-                <div key={b.name} className="brokerage-card" style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                <div
+                  key={b.name}
+                  className="brokerage-card"
+                  style={{ display: 'flex', alignItems: 'center', gap: 10 }}
+                >
                   <BrokerageLogo name={b.name} />
                   <div style={{ minWidth: 0 }}>
                     <div className="brokerage-name">{b.name}</div>
@@ -508,8 +718,8 @@ export function AddAccountView({ prefillBrokerage }: { prefillBrokerage?: string
               ))}
             </div>
             <div className="muted" style={{ fontSize: 12, marginTop: 14, lineHeight: 1.55 }}>
-              Don't see yours? Drop the CSV anyway, we'll fall back to the column-mapping wizard and remember the
-              shape for next time.
+              Don't see yours? Drop the CSV anyway, we'll fall back to the column-mapping wizard and remember
+              the shape for next time.
             </div>
           </div>
         </>
@@ -547,7 +757,8 @@ export function AddAccountView({ prefillBrokerage }: { prefillBrokerage?: string
             }}
           >
             {multiAccount.accounts.map(acc => {
-              const typeLabel = acc.accountTypeHint === 'unknown' ? 'Unknown type' : labelFor(acc.accountTypeHint);
+              const typeLabel =
+                acc.accountTypeHint === 'unknown' ? 'Unknown type' : labelFor(acc.accountTypeHint);
               return (
                 <button
                   key={acc.key}
@@ -598,10 +809,15 @@ export function AddAccountView({ prefillBrokerage }: { prefillBrokerage?: string
             <div className="card-title-row">
               <div>
                 <div className="card-title">File</div>
-                <div style={{ fontFamily: 'var(--font-mono)', fontSize: 13, color: 'var(--ink)', marginTop: 4 }}>
+                <div
+                  style={{ fontFamily: 'var(--font-mono)', fontSize: 13, color: 'var(--ink)', marginTop: 4 }}
+                >
                   {reviewing.fileName}
                 </div>
-                <div className="muted" style={{ fontSize: 11.5, fontFamily: 'var(--font-mono)', marginTop: 2 }}>
+                <div
+                  className="muted"
+                  style={{ fontSize: 11.5, fontFamily: 'var(--font-mono)', marginTop: 2 }}
+                >
                   {reviewing.result.inferences.brokerage} ·{' '}
                   {Math.round(reviewing.csvText.length / 1024).toLocaleString()} KB ·{' '}
                   {reviewing.result.transactions.length} rows · read locally
@@ -622,8 +838,8 @@ export function AddAccountView({ prefillBrokerage }: { prefillBrokerage?: string
                 lineHeight: 1.5,
               }}
             >
-              <span style={{ color: 'var(--ink-2)', fontWeight: 500 }}>Privacy ·</span> the CSV is parsed in this app
-              only. The file isn't uploaded anywhere; transactions land in your local SQLite DB.
+              <span style={{ color: 'var(--ink-2)', fontWeight: 500 }}>Privacy ·</span> the CSV is parsed in
+              this app only. The file isn't uploaded anywhere; transactions land in your local SQLite DB.
             </div>
           </div>
 
@@ -691,8 +907,7 @@ export function AddAccountView({ prefillBrokerage }: { prefillBrokerage?: string
                     color: 'var(--ink-3)',
                   }}
                 >
-                  Unrecognized actions:{' '}
-                  {reviewing.result.unmappedActionStrings.slice(0, 5).join(', ')}
+                  Unrecognized actions: {reviewing.result.unmappedActionStrings.slice(0, 5).join(', ')}
                   {reviewing.result.unmappedActionStrings.length > 5 && '…'}
                 </div>
               )}
@@ -708,7 +923,9 @@ export function AddAccountView({ prefillBrokerage }: { prefillBrokerage?: string
 
               <input
                 type="text"
-                value={nameMode === 'default' ? techName : nameMode === 'custom' ? customName : selectedFunName}
+                value={
+                  nameMode === 'default' ? techName : nameMode === 'custom' ? customName : selectedFunName
+                }
                 onChange={e => {
                   setNameMode('custom');
                   setCustomName(e.target.value);
@@ -730,7 +947,7 @@ export function AddAccountView({ prefillBrokerage }: { prefillBrokerage?: string
                 Suggestions
               </div>
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 8 }}>
-                {FUN_NAMES.map(n => (
+                {funNames.map(n => (
                   <button
                     key={n}
                     onClick={() => {
@@ -745,8 +962,9 @@ export function AddAccountView({ prefillBrokerage }: { prefillBrokerage?: string
                 <button
                   onClick={() => setNameMode('default')}
                   className={`name-suggest boring ${nameMode === 'default' ? 'active' : ''}`}
+                  title="Use the canonical brokerage + account-type name"
                 >
-                  Just the boring one
+                  {techName}
                 </button>
               </div>
 
@@ -772,7 +990,9 @@ export function AddAccountView({ prefillBrokerage }: { prefillBrokerage?: string
 
       {step === 'done' && (
         <div className="card" style={{ padding: '36px 32px', textAlign: 'center' }}>
-          <div style={{ fontFamily: 'var(--font-display)', fontSize: 32, color: 'var(--ink)', marginBottom: 10 }}>
+          <div
+            style={{ fontFamily: 'var(--font-display)', fontSize: 32, color: 'var(--ink)', marginBottom: 10 }}
+          >
             Saved.
           </div>
           <div className="muted" style={{ fontSize: 13, maxWidth: 480, margin: '0 auto' }}>
@@ -793,7 +1013,19 @@ export function AddAccountView({ prefillBrokerage }: { prefillBrokerage?: string
             >
               Add another
             </button>
-            <button className="btn btn-primary" onClick={() => window.location.reload()}>
+            <button
+              className="btn btn-primary"
+              onClick={() => {
+                // Prefer the in-memory reload callback so we keep the quote
+                // cache warm. Fall back to a hard reload when the host didn't
+                // provide one (e.g. an isolated test renders the view).
+                if (onReloadPortfolio) {
+                  void onReloadPortfolio();
+                } else {
+                  window.location.reload();
+                }
+              }}
+            >
               Reload to see it
             </button>
           </div>
@@ -959,8 +1191,8 @@ function ColumnMapperStep({
             lineHeight: 1.5,
           }}
         >
-          Fields with an asterisk are required. We remember the mapping for any CSV that has the same headers, so
-          you only do this once per file shape.
+          Fields with an asterisk are required. We remember the mapping for any CSV that has the same headers,
+          so you only do this once per file shape.
         </div>
       </div>
 
@@ -992,8 +1224,8 @@ function ColumnMapperStep({
             </div>
           ) : !samplePreview || !samplePreview.first ? (
             <div className="muted" style={{ fontSize: 12.5, marginTop: 10, lineHeight: 1.6 }}>
-              No rows could be parsed with the current map. Try a different Action column, or check that the values
-              look like buy/sell/dividend.
+              No rows could be parsed with the current map. Try a different Action column, or check that the
+              values look like buy/sell/dividend.
             </div>
           ) : (
             <div
@@ -1103,10 +1335,18 @@ function PreviewRow({ k, v }: { k: string; v: string }) {
 }
 
 function CsvPreview({ text }: { text: string }) {
-  const lines = text.split(/\r?\n/).filter(Boolean);
-  const rows = lines.slice(0, 7).map(l => l.split(','));
+  // Use Papa.parse so quoted cells containing commas (e.g. "APPLE INC, CL A")
+  // render correctly. The old naive text.split(',') broke any row with a
+  // quoted comma-bearing field and produced misaligned preview cells.
+  const parsed = Papa.parse<string[]>(text, {
+    header: false,
+    skipEmptyLines: 'greedy',
+    preview: 7,
+  });
+  const rows = (parsed.data as string[][]).filter(r => r.length > 0);
   const header = rows[0] || [];
   const data = rows.slice(1);
+  const totalLines = text.split(/\r?\n/).filter(Boolean).length;
   return (
     <div
       style={{
@@ -1156,7 +1396,7 @@ function CsvPreview({ text }: { text: string }) {
                     maxWidth: 160,
                   }}
                 >
-                  {c || <span className="dim">—</span>}
+                  {c || <span className="dim">--</span>}
                 </td>
               ))}
             </tr>
@@ -1174,7 +1414,7 @@ function CsvPreview({ text }: { text: string }) {
           textAlign: 'center',
         }}
       >
-        … {Math.max(0, lines.length - 7)} more rows
+        … {Math.max(0, totalLines - 7)} more rows
       </div>
     </div>
   );

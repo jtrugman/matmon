@@ -28,6 +28,11 @@ portfolio.db-wal
 *.sqlite
 *.sqlite-journal
 
+# --- Playwright ---
+playwright-report/
+test-results/
+.playwright/
+
 # --- Misc ---
 .DS_Store
 

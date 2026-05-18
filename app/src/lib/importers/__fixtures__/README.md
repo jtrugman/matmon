@@ -19,12 +19,12 @@ Anything that looks real is coincidence.
 
 The four importers ship with Matmon today:
 
-| Directory         | Importer ID     | Capability         | Export location (best-effort) |
-| ----------------- | --------------- | ------------------ | ----------------------------- |
-| `fidelity/`       | `fidelity`      | transaction-level  | Accounts and Trade, then Activity and Orders, then History tab, then Download (CSV). |
-| `schwab/`         | `schwab`        | transaction-level  | Accounts, then History, set date range, then Export. Covers legacy TD Ameritrade exports too. |
-| `jpmorgan/`       | `jpmorgan`      | transaction-level  | Investments, then Activity, then Download (CSV). Also fires for Chase Brokerage exports. |
-| `humanInterest/`  | `humanInterest` | holdings-only      | TODO: confirm. Believed to live under Investments, then Statements and Documents on the participant dashboard. |
+| Directory        | Importer ID     | Capability        | Export location (best-effort)                                                                                  |
+| ---------------- | --------------- | ----------------- | -------------------------------------------------------------------------------------------------------------- |
+| `fidelity/`      | `fidelity`      | transaction-level | Accounts and Trade, then Activity and Orders, then History tab, then Download (CSV).                           |
+| `schwab/`        | `schwab`        | transaction-level | Accounts, then History, set date range, then Export. Covers legacy TD Ameritrade exports too.                  |
+| `jpmorgan/`      | `jpmorgan`      | transaction-level | Investments, then Activity, then Download (CSV). Also fires for Chase Brokerage exports.                       |
+| `humanInterest/` | `humanInterest` | holdings-only     | TODO: confirm. Believed to live under Investments, then Statements and Documents on the participant dashboard. |
 
 ## Adding your own real export
 
@@ -71,7 +71,7 @@ claims. Read the source if you are crafting a new fixture by hand:
   fees column (`Fees & Comm`, `Commission`, or `Fees and Comm`).
 - `src/lib/importers/jpmorgan.ts`: expects `Trade Date` or `Posting Date`,
   a transaction type column, `Symbol` or `Security Symbol`, and `Net
-  Amount` or `Amount`.
+Amount` or `Amount`.
 - `src/lib/importers/humanInterest.ts`: expects a fund or investment
   column, a `Shares` or `Units` column, and one of the contribution
   columns (`Employee Contributions`, `Employer Contributions`).

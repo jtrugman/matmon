@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 
 const TWEAKS_STYLE = `
@@ -92,7 +92,11 @@ export function TweaksPanel({ title = 'Tweaks', children }: { title?: string; ch
         </button>
       )}
       {open && (
-        <div ref={dragRef} className="twk-panel" style={{ right: offsetRef.current.x, bottom: offsetRef.current.y }}>
+        <div
+          ref={dragRef}
+          className="twk-panel"
+          style={{ right: offsetRef.current.x, bottom: offsetRef.current.y }}
+        >
           <div className="twk-hd" onMouseDown={onDragStart}>
             <b>{title}</b>
             <button className="twk-x" onMouseDown={e => e.stopPropagation()} onClick={() => setOpen(false)}>

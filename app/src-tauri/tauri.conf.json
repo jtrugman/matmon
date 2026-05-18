@@ -26,7 +26,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; connect-src 'self' https://query1.finance.yahoo.com https://query2.finance.yahoo.com https://www.alphavantage.co https://finnhub.io; img-src 'self' data: https:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; script-src 'self'"
+      "csp": "default-src 'self'; connect-src 'self' https://query1.finance.yahoo.com https://img.logo.dev; img-src 'self' data: https:; style-src 'self' 'unsafe-inline'; font-src 'self'; script-src 'self'"
     }
   },
   "bundle": {

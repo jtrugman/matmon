@@ -1,9 +1,9 @@
 // Performance math. Two industry-standard return calculations:
 //
-//   TWR  (time-weighted return)     — Removes the effect of deposits/withdrawals.
-//                                     Standard for benchmarking against indices.
-//   XIRR (money-weighted IRR)       — Internal rate of return given actual cash
-//                                     flows. Answers "what did I actually earn?"
+//   TWR  (time-weighted return):    Removes the effect of deposits/withdrawals.
+//                                    Standard for benchmarking against indices.
+//   XIRR (money-weighted IRR):      Internal rate of return given actual cash
+//                                    flows. Answers "what did I actually earn?"
 //
 // Both operate on a generic cash-flow series so the same code paths work for
 // the whole portfolio, a single account, or a single holding.
@@ -30,7 +30,9 @@ export type ValuePoint = {
 //
 // Returns annualized rate as a decimal (0.108 = 10.8%) or NaN if it doesn't converge.
 
-const MS_PER_YEAR = 365 * 24 * 60 * 60 * 1000;
+// 365.25 (Julian year) accounts for leap years over multi-year windows. With a
+// flat 365 the cumulative drift is ~0.07%/year on long-horizon XIRRs.
+const MS_PER_YEAR = 365.25 * 24 * 60 * 60 * 1000;
 
 function npv(rate: number, flows: CashFlow[]): number {
   const t0 = flows[0].date.getTime();
@@ -85,9 +87,9 @@ export function xirr(flows: CashFlow[], guess = 0.1): number {
 //   TWR = Π (1 + r_i) - 1, where r_i = (V_end - flow_in_period) / V_begin - 1
 //
 // Inputs:
-//   values  — chronological [{date, value}] of portfolio MV (e.g. month-end snapshots)
-//   flows   — [{date, amount}] external contributions/withdrawals (NOT dividends
-//             reinvested inside the account; those are internal)
+//   values:  chronological [{date, value}] of portfolio MV (e.g. month-end snapshots)
+//   flows:   [{date, amount}] external contributions/withdrawals (NOT dividends
+//            reinvested inside the account; those are internal)
 //
 // Returns cumulative TWR (e.g. 0.45 = +45% over the whole period).
 // Use annualizeTwr to convert to annualized.
@@ -116,31 +118,253 @@ export function twr(values: ValuePoint[], flows: CashFlow[] = []): number {
 
 export function annualizeTwr(cumulativeTwr: number, days: number): number {
   if (!isFinite(cumulativeTwr) || days <= 0) return NaN;
-  const years = days / 365;
-  if (years < 1 / 12) return cumulativeTwr; // <1 month — don't annualize, too noisy
+  // 365.25 matches the Julian-year denominator used by XIRR, so a portfolio
+  // measured over a full leap-inclusive window doesn't drift between metrics.
+  const years = days / 365.25;
+  if (years < 1 / 12) return cumulativeTwr; // <1 month, don't annualize, too noisy
   return Math.pow(1 + cumulativeTwr, 1 / years) - 1;
 }
 
-// Convenience: returns the cash flows derived from a list of transactions
-// for use with xirr (pairing them with a final +marketValue flow).
-export function flowsFromTransactions(
-  txs: Array<{ date: Date; action: string; quantity: number; price: number; fees: number; amount: number | null }>,
-): CashFlow[] {
-  const out: CashFlow[] = [];
-  for (const t of txs) {
-    let amt = t.amount ?? 0;
-    if (amt === 0) {
-      // Derive from qty * price for actions where amount column was blank.
-      if (t.action === 'buy' || t.action === 'div_reinvest' || t.action === 'transfer_in') amt = -(t.quantity * t.price + t.fees);
-      else if (t.action === 'sell' || t.action === 'transfer_out') amt = t.quantity * t.price - t.fees;
-      else if (t.action === 'dividend' || t.action === 'interest') amt = 0; // internal, dropped below
-    }
-    // For XIRR we want EXTERNAL flows only: buys/sells/transfers/contributions/withdrawals.
-    // Dividends and interest are internal income (they don't represent your money
-    // going in or coming out of the account boundary).
-    if (t.action === 'dividend' || t.action === 'div_reinvest' || t.action === 'interest') continue;
-    if (amt === 0) continue;
-    out.push({ date: t.date, amount: amt });
+/**
+ * Cumulative TWR over a date window. Clamps the window start to the earliest
+ * available NAV point (so a "YTD" call on a portfolio that starts in March
+ * doesn't fabricate a pre-portfolio baseline). Returns NaN when there isn't
+ * enough data inside the window to compute a return.
+ *
+ * Inputs:
+ *   series:  full chronological NAV series, oldest-first.
+ *   flows:   external cash flows (optional). Same sign convention as twr().
+ *   start:   window start. Clamped up to series[0].date when earlier.
+ *   end:     window end. Clamped down to series.last().date when later.
+ *
+ * The result is cumulative (e.g. 0.12 = +12% over the window). Pair with
+ * annualizeTwr if the window is multi-year and you want a per-year number.
+ */
+export function twrOverWindow(
+  series: ValuePoint[],
+  flows: CashFlow[],
+  start: Date,
+  end: Date,
+): number {
+  if (series.length < 2) return NaN;
+  const sortedSeries = [...series].sort((a, b) => +a.date - +b.date);
+  // Clamp the start up to the earliest point we have. Don't return a
+  // pre-portfolio baseline; that would treat new money as a "loss".
+  const firstAvailable = sortedSeries[0].date;
+  const effectiveStart = +start < +firstAvailable ? firstAvailable : start;
+  if (+effectiveStart > +end) return NaN;
+
+  const windowed = sortedSeries.filter(p => +p.date >= +effectiveStart && +p.date <= +end);
+  if (windowed.length < 2) return NaN;
+  const windowedFlows = flows.filter(f => +f.date > +effectiveStart && +f.date <= +end);
+  return twr(windowed, windowedFlows);
+}
+
+// ─── External cash-flow extraction ─────────────────────────────────
+//
+// XIRR (and the TWR adjustment loop above) needs ONE flow per external
+// boundary crossing, meaning money or securities entering/leaving the
+// portfolio from the outside. The subtle part:
+//
+//   1. `cash_in`, `cash_out`, `contribution`, `withdrawal`
+//      Always external. The user moved money across the boundary.
+//
+//   2. `transfer_in`, `transfer_out`
+//      Usually external (ACAT transfers from another brokerage). But Fidelity
+//      capital-gains DISTRIBUTIONS paid as shares get re-tagged by the
+//      Fidelity importer to `transfer_in` so the holdings replay treats them
+//      as cost-basis-increasing. For XIRR purposes those are INTERNAL (no
+//      money came from outside the portfolio). We detect them by a sentinel
+//      tag in `notes` that the Fidelity importer attaches.
+//
+//   3. `buy`, `sell`
+//      Always INTERNAL when there's a paired external boundary nearby (the
+//      user just deployed cash that already crossed the boundary). EXTERNAL
+//      only when there's no boundary signal at all (Schwab transaction
+//      exports surface buys but not the deposits that funded them, so the
+//      buy itself is our only handle on "money came in").
+//
+//   4. `dividend`, `interest`, `div_reinvest`
+//      Always internal. Income paid inside the account, not new money.
+//
+// Sign convention (USER's perspective):
+//   Negative = money INTO the portfolio (buy, contribution, transfer_in)
+//   Positive = money OUT of the portfolio (sell, withdrawal, transfer_out)
+//
+// Some brokerages export "Amount" from THEIR accounting perspective (positive
+// when they receive funds), which is the OPPOSITE of the user's perspective
+// for inflows like "Electronic Funds Transfer Received". We canonicalize by
+// action regardless of the source CSV's sign.
+
+/** Sentinel the Fidelity importer attaches to notes for share-based fund
+ *  distributions that get re-tagged from `dividend` to `transfer_in`. When
+ *  present we treat the row as internal for XIRR purposes (no external
+ *  money/securities crossed the portfolio boundary). */
+export const INTERNAL_TRANSFER_TAG = '[internal:fund-distribution]';
+
+/** Days on either side of a buy/sell to look for a paired cash boundary row. */
+const PAIRING_WINDOW_DAYS = 3;
+const MS_PER_DAY = 24 * 60 * 60 * 1000;
+
+type FlowTxInput = {
+  date: Date;
+  action: string;
+  quantity: number;
+  price: number;
+  fees: number;
+  amount: number | null;
+  /** Optional: lets pairing scope to a single account when present. */
+  account_id?: string;
+  /** Optional: used to detect the INTERNAL_TRANSFER_TAG sentinel. */
+  notes?: string | null;
+};
+
+function flowCategory(action: string): 'boundary' | 'trade' | 'income' | 'other' {
+  switch (action) {
+    case 'cash_in':
+    case 'cash_out':
+    case 'contribution':
+    case 'withdrawal':
+      return 'boundary';
+    case 'transfer_in':
+    case 'transfer_out':
+      // Always external. Fidelity capital-gains DISTRIBUTIONS paid as shares
+      // get re-tagged to `transfer_in` by the Fidelity importer (and tagged
+      // in notes with INTERNAL_TRANSFER_TAG for traceability). For XIRR
+      // purposes we still treat those as boundary flows: the share-value
+      // gain entered the portfolio from outside the user's pocket, and
+      // excluding it would attribute the entire gain to the user's deposits
+      // and produce a wildly inflated annualized rate over a short window.
+      return 'boundary';
+    case 'buy':
+    case 'sell':
+      return 'trade';
+    case 'dividend':
+    case 'div_reinvest':
+    case 'interest':
+      return 'income';
+    default:
+      return 'other';
   }
-  return out;
+}
+
+function txMagnitude(t: FlowTxInput): number {
+  if (t.amount != null && t.amount !== 0) return Math.abs(t.amount);
+  if (t.action === 'sell') return Math.max(0, t.quantity * t.price - t.fees);
+  return t.quantity * t.price + (t.action === 'buy' ? t.fees : 0);
+}
+
+function flowDirection(action: string): -1 | 1 | 0 {
+  switch (action) {
+    case 'buy':
+    case 'transfer_in':
+    case 'cash_in':
+    case 'contribution':
+      return -1;
+    case 'sell':
+    case 'transfer_out':
+    case 'cash_out':
+    case 'withdrawal':
+      return 1;
+    default:
+      return 0;
+  }
+}
+
+/**
+ * Build the external cash-flow series for XIRR.
+ *
+ * Rules in order:
+ *   1. `cash_in` / `cash_out` / `contribution` / `withdrawal` always emit one
+ *      external flow per row.
+ *   2. `transfer_in` / `transfer_out` emit external flows UNLESS the row
+ *      carries the INTERNAL_TRANSFER_TAG sentinel (set by importers for
+ *      fund-internal share distributions like Fidelity capital-gains payouts).
+ *   3. `buy` / `sell` emit ONLY when no opposite-direction boundary flow
+ *      within +/- PAIRING_WINDOW_DAYS (same account when known) has enough
+ *      remaining "capacity" to cover them. When a boundary flow IS present,
+ *      it represents the actual external money movement; the trade itself is
+ *      just the user deploying that cash inside the portfolio. This prevents
+ *      the classic "deposit $1,000 then immediately buy $1,000 of VGT" case
+ *      from being counted as -$2,000 of external flow.
+ *   4. `dividend` / `interest` / `div_reinvest` are always dropped (internal
+ *      income, already baked into the resolved market value used as the
+ *      terminal +flow).
+ */
+export function flowsFromTransactions(txs: FlowTxInput[]): CashFlow[] {
+  if (txs.length === 0) return [];
+
+  const sorted = [...txs].sort((a, b) => +a.date - +b.date);
+
+  // First pass: emit every boundary row AND track per-account remaining
+  // "capacity" for pairing trades against it on the second pass.
+  type Boundary = {
+    date: Date;
+    account: string;
+    direction: -1 | 1;
+    remaining: number;
+  };
+  const boundaries: Boundary[] = [];
+  const flows: CashFlow[] = [];
+
+  for (const t of sorted) {
+    const cat = flowCategory(t.action);
+    if (cat !== 'boundary') continue;
+    const dir = flowDirection(t.action);
+    if (dir === 0) continue;
+    const mag = txMagnitude(t);
+    if (mag <= 0) continue;
+    flows.push({ date: t.date, amount: dir * mag });
+    boundaries.push({
+      date: t.date,
+      account: t.account_id ?? '',
+      direction: dir,
+      remaining: mag,
+    });
+  }
+
+  // Second pass: for each trade, look for a boundary in the window with the
+  // same direction (cash_in pairs with buy, cash_out with sell) and any
+  // remaining capacity. If found, "consume" capacity and skip emitting the
+  // trade. If not, emit the trade because it's our only signal that money
+  // crossed the portfolio boundary.
+  for (const t of sorted) {
+    const cat = flowCategory(t.action);
+    if (cat !== 'trade') continue;
+    const dir = flowDirection(t.action);
+    if (dir === 0) continue;
+    const mag = txMagnitude(t);
+    if (mag <= 0) continue;
+    const account = t.account_id ?? '';
+    const windowMs = PAIRING_WINDOW_DAYS * MS_PER_DAY;
+
+    let matched = false;
+    for (const b of boundaries) {
+      if (b.direction !== dir) continue;
+      if (b.remaining <= 0) continue;
+      // Only match same-account when both sides have an account_id. When
+      // either is missing we fall back to the global pool, which matches
+      // existing callers that don't carry account_id yet.
+      if (account && b.account && b.account !== account) continue;
+      const dt = Math.abs(+b.date - +t.date);
+      if (dt > windowMs) continue;
+      // Consume capacity. If a single boundary fully covers the trade, the
+      // trade is purely internal. If it only partially covers, we drain what
+      // we can and STILL skip the trade (the leftover represents either a
+      // sibling trade we'll see in the loop or the user keeping cash on the
+      // sidelines). Avoiding double-counting is the whole point.
+      const used = Math.min(b.remaining, mag);
+      b.remaining -= used;
+      matched = true;
+      break;
+    }
+    if (matched) continue;
+
+    // No boundary signal: the trade itself IS the external flow (typical of
+    // Schwab transaction exports where deposits aren't surfaced as line items).
+    flows.push({ date: t.date, amount: dir * mag });
+  }
+
+  flows.sort((a, b) => +a.date - +b.date);
+  return flows;
 }

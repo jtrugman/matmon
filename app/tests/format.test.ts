@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { fmtDate, fmtMoney, fmtPct } from '../src/lib/format';
+import { fmtDate, fmtMoney, fmtPct, formatPricesAsOf } from '../src/lib/format';
 
 describe('fmtMoney', () => {
   it('formats whole dollars with thousands separators', () => {
@@ -26,9 +26,9 @@ describe('fmtMoney', () => {
     expect(fmtMoney(412, { compact: true })).toBe('$412');
   });
 
-  it('returns em-dash for null/undefined', () => {
-    expect(fmtMoney(null)).toBe('—');
-    expect(fmtMoney(undefined)).toBe('—');
+  it('returns double-hyphen placeholder for null/undefined', () => {
+    expect(fmtMoney(null)).toBe('--');
+    expect(fmtMoney(undefined)).toBe('--');
   });
 
   it('handles zero', () => {
@@ -52,7 +52,7 @@ describe('fmtPct', () => {
   });
 
   it('handles null', () => {
-    expect(fmtPct(null)).toBe('—');
+    expect(fmtPct(null)).toBe('--');
   });
 });
 
@@ -69,5 +69,80 @@ describe('fmtDate', () => {
 
   it('year only', () => {
     expect(fmtDate(d, 'year')).toBe('2026');
+  });
+});
+
+describe('formatPricesAsOf', () => {
+  // Fixed reference "now" for deterministic snapshots. May 18 2026 (a Monday),
+  // 3:00pm local. The local-time anchor matters: the helper compares calendar
+  // days in local time, so swapping in UTC math here would flake.
+  const now = new Date(2026, 4, 18, 15, 0, 0);
+
+  it('returns the "not yet fetched" fallback when given null', () => {
+    expect(formatPricesAsOf(null, now)).toBe('Prices not yet fetched');
+    expect(formatPricesAsOf(undefined, now)).toBe('Prices not yet fetched');
+  });
+
+  it('shows lowercase am/pm time when the fetch landed today', () => {
+    // 2:45pm same day
+    const at = new Date(2026, 4, 18, 14, 45, 30);
+    expect(formatPricesAsOf(at, now)).toBe('Prices as of 2:45pm');
+  });
+
+  it('treats a morning fetch on the same day as same-day (am label)', () => {
+    // 9:05am earlier the same day
+    const at = new Date(2026, 4, 18, 9, 5, 0);
+    expect(formatPricesAsOf(at, now)).toBe('Prices as of 9:05am');
+  });
+
+  it('shows weekday + time for yesterday', () => {
+    // Sun May 17 11:32am, viewed from Mon May 18 3:00pm
+    const at = new Date(2026, 4, 17, 11, 32, 0);
+    expect(formatPricesAsOf(at, now)).toBe('Prices as of Sun 11:32am');
+  });
+
+  it('shows weekday + time for 3 days ago', () => {
+    // Fri May 15 4:00pm, viewed from Mon May 18 3:00pm
+    const at = new Date(2026, 4, 15, 16, 0, 0);
+    expect(formatPricesAsOf(at, now)).toBe('Prices as of Fri 4:00pm');
+  });
+
+  it('falls back to "Month Day" once the fetch is older than 6 days', () => {
+    // May 8 noon, viewed from May 18 3:00pm = 10 days ago
+    const at = new Date(2026, 4, 8, 12, 0, 0);
+    expect(formatPricesAsOf(at, now)).toBe('Prices as of May 8');
+  });
+
+  it('uses 12pm for noon and 12am for midnight', () => {
+    expect(formatPricesAsOf(new Date(2026, 4, 18, 12, 0, 0), now)).toBe('Prices as of 12:00pm');
+    expect(formatPricesAsOf(new Date(2026, 4, 18, 0, 0, 0), now)).toBe('Prices as of 12:00am');
+  });
+
+  it('same-day morning fetch shows am label', () => {
+    // 8:15am on the same calendar day as `now` (3:00pm).
+    const at = new Date(2026, 4, 18, 8, 15, 0);
+    expect(formatPricesAsOf(at, now)).toBe('Prices as of 8:15am');
+  });
+
+  it('same-day afternoon fetch shows pm label', () => {
+    // 2:30pm on the same calendar day as `now`.
+    const at = new Date(2026, 4, 18, 14, 30, 0);
+    expect(formatPricesAsOf(at, now)).toBe('Prices as of 2:30pm');
+  });
+
+  it('yesterday fetch (Sunday) shows "Sun <time>"', () => {
+    // Sun May 17 6:00pm, viewed from Mon May 18 3:00pm.
+    const at = new Date(2026, 4, 17, 18, 0, 0);
+    expect(formatPricesAsOf(at, now)).toBe('Prices as of Sun 6:00pm');
+  });
+
+  it('three-days-ago fetch shows weekday + time', () => {
+    // Fri May 15 4:00pm, viewed from Mon May 18 3:00pm.
+    const at = new Date(2026, 4, 15, 16, 0, 0);
+    expect(formatPricesAsOf(at, now)).toBe('Prices as of Fri 4:00pm');
+  });
+
+  it('returns the not-yet-fetched fallback for null input', () => {
+    expect(formatPricesAsOf(null, now)).toBe('Prices not yet fetched');
   });
 });

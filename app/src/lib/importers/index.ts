@@ -1,24 +1,43 @@
 import Papa from 'papaparse';
 import type { BrokerageImporter, ImporterResult, ParsedTransaction } from './types';
-import { fidelityImporter } from './fidelity';
+import {
+  fidelityImporter,
+  detectSingleAccountFidelityRejection,
+  FIDELITY_SINGLE_ACCOUNT_REJECTION_MESSAGE,
+  FIDELITY_SINGLE_ACCOUNT_REJECTION_KIND,
+} from './fidelity';
 import { schwabImporter } from './schwab';
 import { jpmImporter } from './jpmorgan';
 import { jpmHoldingsImporter } from './jpmHoldings';
 import { humanInterestImporter } from './humanInterest';
+import { matmonUniversalImporter } from './matmonUniversal';
 import { mapAction, parseDate, parseNumber, rowHash } from './util';
 
 export type { BrokerageImporter, ImporterResult, ParsedTransaction };
 
-// Order matters: jpmHoldingsImporter is listed before jpmImporter so the
-// positions/lots export is matched first when both could theoretically claim a
-// file. In practice the two have non-overlapping headers (lots use CUSIP +
-// Acquisition Date; transactions use Trade Date + Transaction Type) so they
-// can't collide, but the explicit ordering keeps detection deterministic.
+// Order matters. The native, header-strict importers run first so they
+// claim their own brokerage exports. The Matmon Universal template runs
+// BEFORE humanInterestImporter because humanInterest has a loose fallback
+// (any row containing "Human Interest" branding wins) that would otherwise
+// hijack a universal-template file whose Brokerage column happens to read
+// "Human Interest". Universal's matches() requires the canonical 6-column
+// signature (Date, Action, Symbol, Amount, Account, Brokerage), which is
+// strict enough to safely run ahead of the brand-string fallback.
+//
+// jpmHoldingsImporter is listed before jpmImporter so the positions/lots
+// export is matched first when both could theoretically claim a file. In
+// practice the two have non-overlapping headers (lots use CUSIP + Acquisition
+// Date; transactions use Trade Date + Transaction Type) so they can't
+// collide, but the explicit ordering keeps detection deterministic.
+//
+// When even the universal template doesn't match, importCsv falls through to
+// the column-mapping wizard.
 export const IMPORTERS: BrokerageImporter[] = [
   fidelityImporter,
   schwabImporter,
   jpmHoldingsImporter,
   jpmImporter,
+  matmonUniversalImporter,
   humanInterestImporter,
 ];
 
@@ -62,29 +81,37 @@ export function preprocessCsv(csvText: string): string {
 }
 
 /**
- * Known wrong-export signatures. Returns a friendly message when the file
- * looks like a balance/positions snapshot instead of a transaction history.
+ * Known wrong-export signatures. Returns a friendly message + machine-readable
+ * kind tag when the file looks like a balance/positions snapshot instead of a
+ * transaction history. Returns null when the file shape isn't recognized as a
+ * known wrong-export case (caller falls back to the column-mapping wizard).
  */
-function detectWrongExport(rawText: string): string | null {
+function detectWrongExport(rawText: string): { reason: string; kind: string } | null {
   const head = rawText.slice(0, 400);
   if (/balances for account/i.test(head)) {
-    return (
-      'This looks like a Schwab balance/positions export. Matmon needs the ' +
-      'Transaction History export instead. In Schwab, go to History, then ' +
-      'Transactions, then Export.'
-    );
+    return {
+      reason:
+        'This looks like a Schwab balance/positions export. Matmon needs the ' +
+        'Transaction History export instead. In Schwab, go to History, then ' +
+        'Transactions, then Export.',
+      kind: 'wrong-schwab-export',
+    };
   }
   if (/^"?positions\b/im.test(head) && /symbol/i.test(head) && !/action/i.test(head)) {
-    return (
-      'This looks like a positions/holdings snapshot. Matmon needs a ' +
-      'transaction history export instead so it can reconstruct cost basis.'
-    );
+    return {
+      reason:
+        'This looks like a positions/holdings snapshot. Matmon needs a ' +
+        'transaction history export instead so it can reconstruct cost basis.',
+      kind: 'wrong-positions-export',
+    };
   }
   if (/portfolio holdings/i.test(head)) {
-    return (
-      'This looks like a portfolio holdings export. Matmon needs a ' +
-      'transaction history export instead so it can reconstruct cost basis.'
-    );
+    return {
+      reason:
+        'This looks like a portfolio holdings export. Matmon needs a ' +
+        'transaction history export instead so it can reconstruct cost basis.',
+      kind: 'wrong-holdings-export',
+    };
   }
   return null;
 }
@@ -116,13 +143,40 @@ export function detect(csvText: string): DetectResult {
 export function importCsv(csvText: string): ImporterResult & { importerId: string | null } {
   const { importer, rows, headers } = detect(csvText);
   if (importer) {
+    // Brokerage-specific pre-parse rejection: Fidelity single-account exports
+    // (no Account Number column) lack the dedup fingerprint Matmon needs to
+    // keep accounts organized. Reject cleanly with a user-facing message
+    // pointing the user at the multi-account "All Accounts" export instead.
+    // Mirrors the Schwab balances-export rejection pattern below.
+    if (
+      importer.id === 'fidelity' &&
+      detectSingleAccountFidelityRejection(headers, rows)
+    ) {
+      return {
+        importerId: null,
+        inferences: {
+          brokerage: 'Fidelity',
+          accountType: 'unknown',
+          currency: 'USD',
+          dateRange: { start: null, end: null },
+          transactionCount: 0,
+          uniqueSymbols: 0,
+          actionsMapped: 0,
+          actionsUnknown: 0,
+        },
+        transactions: [],
+        unmappedActionStrings: [],
+        rejectionReason: FIDELITY_SINGLE_ACCOUNT_REJECTION_MESSAGE,
+        rejectionKind: FIDELITY_SINGLE_ACCOUNT_REJECTION_KIND,
+      };
+    }
     return { ...importer.parse(rows), importerId: importer.id };
   }
 
   // No importer matched. Before falling back to the column-mapping wizard,
   // check whether the file is a known wrong-shape export (balances/positions
   // instead of transaction history) and tell the user what to upload.
-  const rejectionReason = detectWrongExport(csvText);
+  const rejection = detectWrongExport(csvText);
 
   return {
     importerId: null,
@@ -138,7 +192,7 @@ export function importCsv(csvText: string): ImporterResult & { importerId: strin
     },
     transactions: [],
     unmappedActionStrings: [],
-    ...(rejectionReason ? { rejectionReason } : {}),
+    ...(rejection ? { rejectionReason: rejection.reason, rejectionKind: rejection.kind } : {}),
   };
 }
 

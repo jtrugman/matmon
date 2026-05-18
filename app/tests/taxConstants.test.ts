@@ -1,9 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import {
-  TAX_CONSTANTS_2026,
-  getTaxConstants,
-  type TaxConstants,
-} from '../src/lib/taxConstants';
+import { TAX_CONSTANTS_2026, getTaxConstants, type TaxConstants } from '../src/lib/taxConstants';
 
 function assertAllPositiveNumbers(obj: Record<string, number>, label: string) {
   for (const [key, value] of Object.entries(obj)) {
@@ -36,9 +32,7 @@ describe('TaxConstants shape', () => {
     expect(Array.isArray(tc.irmaa.brackets)).toBe(true);
     expect(tc.irmaa.brackets.length).toBeGreaterThan(0);
     for (let i = 1; i < tc.irmaa.brackets.length; i++) {
-      expect(tc.irmaa.brackets[i].incomeMin).toBeGreaterThan(
-        tc.irmaa.brackets[i - 1].incomeMin,
-      );
+      expect(tc.irmaa.brackets[i].incomeMin).toBeGreaterThan(tc.irmaa.brackets[i - 1].incomeMin);
       expect(tc.irmaa.brackets[i].partB_add).toBeGreaterThanOrEqual(0);
       expect(tc.irmaa.brackets[i].partD_add).toBeGreaterThanOrEqual(0);
     }
@@ -52,16 +46,12 @@ describe('TaxConstants shape', () => {
 describe('Sanity checks on contribution limits', () => {
   it('401(k) deferral cap exceeds the IRA cap', () => {
     const tc = getTaxConstants();
-    expect(tc.contributionLimits.traditional_401k).toBeGreaterThan(
-      tc.contributionLimits.traditional_ira,
-    );
+    expect(tc.contributionLimits.traditional_401k).toBeGreaterThan(tc.contributionLimits.traditional_ira);
   });
 
   it('HSA family cap exceeds the HSA self-only cap', () => {
     const tc = getTaxConstants();
-    expect(tc.contributionLimits.hsa_family).toBeGreaterThan(
-      tc.contributionLimits.hsa_self_only,
-    );
+    expect(tc.contributionLimits.hsa_family).toBeGreaterThan(tc.contributionLimits.hsa_self_only);
   });
 
   it('Traditional and Roth IRA caps are aligned (combined-limit rule)', () => {
@@ -72,8 +62,7 @@ describe('Sanity checks on contribution limits', () => {
   it('Fidelity couple estimate is roughly double the single estimate', () => {
     const tc = getTaxConstants();
     const ratio =
-      tc.healthcare.fidelityRetireeEstimateCouple /
-      tc.healthcare.fidelityRetireeEstimatePerPerson;
+      tc.healthcare.fidelityRetireeEstimateCouple / tc.healthcare.fidelityRetireeEstimatePerPerson;
     expect(ratio).toBeGreaterThanOrEqual(1.5);
     expect(ratio).toBeLessThanOrEqual(2.5);
   });
