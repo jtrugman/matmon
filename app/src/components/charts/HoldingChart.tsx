@@ -3,11 +3,11 @@ import { fmtDate, fmtMoney } from '../../lib/format';
 import type { SeriesPoint } from '../../data';
 
 export type ChartTx = {
-  id: number;
+  id: number | string;
   date: Date;
   qty: number;
   price: number;
-  amount?: number;
+  amount?: number | null;
   account?: string;
 };
 
@@ -276,24 +276,30 @@ export function HoldingChart({
                 markerHover.kind === 'buy'
                   ? 'var(--gain)'
                   : markerHover.kind === 'sell'
-                  ? 'var(--loss)'
-                  : 'var(--accent)',
+                    ? 'var(--loss)'
+                    : 'var(--accent)',
             }}
           >
             {markerHover.kind === 'buy'
               ? 'You bought'
               : markerHover.kind === 'sell'
-              ? 'You sold'
-              : 'Dividend received'}
+                ? 'You sold'
+                : 'Dividend received'}
           </div>
           <div className="hd-tooltip-title">
-            {markerHover.tx.date.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })}
+            {markerHover.tx.date.toLocaleDateString('en-US', {
+              month: 'long',
+              day: 'numeric',
+              year: 'numeric',
+            })}
           </div>
           {markerHover.kind !== 'div' ? (
             <div className="hd-tooltip-body">
               <div>
                 <span>Qty</span>
-                <span className="num">{markerHover.tx.qty.toLocaleString('en-US', { maximumFractionDigits: 2 })}</span>
+                <span className="num">
+                  {markerHover.tx.qty.toLocaleString('en-US', { maximumFractionDigits: 2 })}
+                </span>
               </div>
               <div>
                 <span>Price</span>
@@ -335,7 +341,15 @@ export function HoldingChart({
             <div className="hd-readout-row">
               <span>
                 <svg width="14" height="2" style={{ marginRight: 6 }}>
-                  <line x1="0" y1="1" x2="14" y2="1" stroke="var(--ink-4)" strokeWidth="1.25" strokeDasharray="3 2" />
+                  <line
+                    x1="0"
+                    y1="1"
+                    x2="14"
+                    y2="1"
+                    stroke="var(--ink-4)"
+                    strokeWidth="1.25"
+                    strokeDasharray="3 2"
+                  />
                 </svg>
                 {benchmarkLabel}
               </span>

@@ -96,7 +96,14 @@ describe('flowsFromTransactions', () => {
     const flows = flowsFromTransactions([
       { date: new Date('2024-01-01'), action: 'buy', quantity: 10, price: 100, fees: 0, amount: -1000 },
       { date: new Date('2024-06-01'), action: 'dividend', quantity: 0, price: 0, fees: 0, amount: 20 },
-      { date: new Date('2024-06-15'), action: 'div_reinvest', quantity: 0.2, price: 100, fees: 0, amount: -20 },
+      {
+        date: new Date('2024-06-15'),
+        action: 'div_reinvest',
+        quantity: 0.2,
+        price: 100,
+        fees: 0,
+        amount: -20,
+      },
       { date: new Date('2024-12-01'), action: 'sell', quantity: 5, price: 120, fees: 0, amount: 600 },
     ]);
     expect(flows).toHaveLength(2); // buy + sell only
@@ -109,5 +116,185 @@ describe('flowsFromTransactions', () => {
       { date: new Date('2024-01-01'), action: 'buy', quantity: 10, price: 100, fees: 5, amount: 0 },
     ]);
     expect(flows[0].amount).toBe(-(1000 + 5));
+  });
+
+  // ─── Bug A regression suite ───────────────────────────────────────────
+  // Five canonical scenarios from the spec. The historical bug emitted both
+  // the cash_in AND the buy that consumed it as separate flows, so $1,000
+  // of real deposit became -$2,000 of "money in" to XIRR. The fix pairs
+  // boundary deposits with same-day-ish trades (+/- 3 days) so a single
+  // deposit-then-buy pattern produces ONE external flow.
+
+  it('scenario A: cash_in + same-day buy → one flow (the deposit)', () => {
+    const flows = flowsFromTransactions([
+      { date: new Date('2024-01-01'), action: 'cash_in', quantity: 0, price: 0, fees: 0, amount: 1000 },
+      {
+        date: new Date('2024-01-01'),
+        action: 'buy',
+        symbol: 'VGT',
+        quantity: 2,
+        price: 500,
+        fees: 0,
+        amount: -1000,
+      } as Parameters<typeof flowsFromTransactions>[0][number],
+    ]);
+    expect(flows).toHaveLength(1);
+    expect(flows[0].amount).toBe(-1000);
+  });
+
+  it('scenario B: standalone buy (no cash_in) → one flow (the buy itself)', () => {
+    const flows = flowsFromTransactions([
+      { date: new Date('2024-01-01'), action: 'buy', quantity: 2, price: 500, fees: 0, amount: -1000 },
+    ]);
+    expect(flows).toHaveLength(1);
+    expect(flows[0].amount).toBe(-1000);
+  });
+
+  it('scenario C: cash_in alone (no buy) → one flow (the deposit)', () => {
+    const flows = flowsFromTransactions([
+      { date: new Date('2024-01-01'), action: 'cash_in', quantity: 0, price: 0, fees: 0, amount: 1000 },
+    ]);
+    expect(flows).toHaveLength(1);
+    expect(flows[0].amount).toBe(-1000);
+  });
+
+  it('scenario D: standalone dividend → zero external flows', () => {
+    const flows = flowsFromTransactions([
+      { date: new Date('2024-01-01'), action: 'dividend', quantity: 0, price: 0, fees: 0, amount: 50 },
+    ]);
+    expect(flows).toHaveLength(0);
+  });
+
+  it('scenario E: dividend + same-day div_reinvest → zero external flows', () => {
+    const flows = flowsFromTransactions([
+      { date: new Date('2024-01-01'), action: 'dividend', quantity: 0, price: 0, fees: 0, amount: 50 },
+      {
+        date: new Date('2024-01-01'),
+        action: 'div_reinvest',
+        quantity: 0.5,
+        price: 100,
+        fees: 0,
+        amount: -50,
+      },
+    ]);
+    expect(flows).toHaveLength(0);
+  });
+
+  // ─── Pairing edge cases ──────────────────────────────────────────────
+
+  it('pairs a single deposit against multiple sibling buys on the same day', () => {
+    // The Fidelity sample's actual shape: one $300 cash_in funds three buys
+    // ($113.89 + $36.10 + $150 = ~$300) on the same day. Should emit ONE
+    // flow of -$300, not four flows totaling -$600.
+    const flows = flowsFromTransactions([
+      { date: new Date('2026-05-11'), action: 'cash_in', quantity: 0, price: 0, fees: 0, amount: 300 },
+      {
+        date: new Date('2026-05-11'),
+        action: 'buy',
+        quantity: 1,
+        price: 113.89,
+        fees: 0,
+        amount: -113.89,
+      },
+      {
+        date: new Date('2026-05-11'),
+        action: 'buy',
+        quantity: 0.317,
+        price: 113.88,
+        fees: 0,
+        amount: -36.1,
+      },
+      {
+        date: new Date('2026-05-11'),
+        action: 'buy',
+        quantity: 0.582,
+        price: 257.73,
+        fees: 0,
+        amount: -150,
+      },
+    ]);
+    expect(flows).toHaveLength(1);
+    expect(flows[0].amount).toBe(-300);
+  });
+
+  it('pairs a deposit with a buy 2 days later (within +/- 3 day window)', () => {
+    const flows = flowsFromTransactions([
+      { date: new Date('2024-01-01'), action: 'cash_in', quantity: 0, price: 0, fees: 0, amount: 1000 },
+      { date: new Date('2024-01-03'), action: 'buy', quantity: 2, price: 500, fees: 0, amount: -1000 },
+    ]);
+    expect(flows).toHaveLength(1);
+    expect(flows[0].amount).toBe(-1000);
+  });
+
+  it('does NOT pair when the buy is outside the +/- 3 day window', () => {
+    // Deposit on Jan 1, buy on Jan 10 → too far apart to be funded by the
+    // same boundary event. Emit both as separate flows.
+    const flows = flowsFromTransactions([
+      { date: new Date('2024-01-01'), action: 'cash_in', quantity: 0, price: 0, fees: 0, amount: 1000 },
+      { date: new Date('2024-01-10'), action: 'buy', quantity: 2, price: 500, fees: 0, amount: -1000 },
+    ]);
+    expect(flows).toHaveLength(2);
+    expect(flows[0].amount).toBe(-1000);
+    expect(flows[1].amount).toBe(-1000);
+  });
+
+  it('pairs a sell with a same-day cash_out (one flow, the withdrawal)', () => {
+    const flows = flowsFromTransactions([
+      { date: new Date('2024-06-01'), action: 'sell', quantity: 5, price: 200, fees: 0, amount: 1000 },
+      { date: new Date('2024-06-01'), action: 'cash_out', quantity: 0, price: 0, fees: 0, amount: 1000 },
+    ]);
+    expect(flows).toHaveLength(1);
+    expect(flows[0].amount).toBe(1000);
+  });
+
+  it('multi-account: a deposit in account A does not cover a buy in account B', () => {
+    // Same-day deposit and buy but different accounts: they must NOT pair.
+    const flows = flowsFromTransactions([
+      {
+        date: new Date('2024-01-01'),
+        action: 'cash_in',
+        quantity: 0,
+        price: 0,
+        fees: 0,
+        amount: 1000,
+        account_id: 'acct-A',
+      },
+      {
+        date: new Date('2024-01-01'),
+        action: 'buy',
+        quantity: 2,
+        price: 500,
+        fees: 0,
+        amount: -1000,
+        account_id: 'acct-B',
+      },
+    ]);
+    expect(flows).toHaveLength(2);
+    expect(flows.every(f => f.amount === -1000)).toBe(true);
+  });
+
+  it('multi-account: same-account deposit + buy still pair correctly', () => {
+    const flows = flowsFromTransactions([
+      {
+        date: new Date('2024-01-01'),
+        action: 'cash_in',
+        quantity: 0,
+        price: 0,
+        fees: 0,
+        amount: 1000,
+        account_id: 'acct-A',
+      },
+      {
+        date: new Date('2024-01-01'),
+        action: 'buy',
+        quantity: 2,
+        price: 500,
+        fees: 0,
+        amount: -1000,
+        account_id: 'acct-A',
+      },
+    ]);
+    expect(flows).toHaveLength(1);
+    expect(flows[0].amount).toBe(-1000);
   });
 });

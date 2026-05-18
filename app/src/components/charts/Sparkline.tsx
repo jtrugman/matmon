@@ -8,12 +8,22 @@ type Props = {
 
 export function Sparkline({ points, color = 'var(--ink-3)', width = 80, height = 22, fill = false }: Props) {
   if (!points || points.length === 0) return null;
+  // A single-point series can't draw a meaningful line. Render a centered dot
+  // so the cell isn't empty but we don't divide by zero on (i / (length - 1)).
+  if (points.length === 1) {
+    return (
+      <svg className="spark" width={width} height={height} viewBox={`0 0 ${width} ${height}`}>
+        <circle cx={width / 2} cy={height / 2} r={1.5} fill={color} />
+      </svg>
+    );
+  }
   const min = Math.min(...points);
   const max = Math.max(...points);
   const range = max - min || 1;
+  const denom = points.length - 1;
   const path = points
     .map((p, i) => {
-      const x = (i / (points.length - 1)) * width;
+      const x = (i / denom) * width;
       const y = height - ((p - min) / range) * height * 0.85 - 2;
       return `${i === 0 ? 'M' : 'L'} ${x.toFixed(2)} ${y.toFixed(2)}`;
     })
@@ -22,7 +32,14 @@ export function Sparkline({ points, color = 'var(--ink-3)', width = 80, height =
   return (
     <svg className="spark" width={width} height={height} viewBox={`0 0 ${width} ${height}`}>
       {fill && <path d={areaPath} fill={color} opacity="0.12" />}
-      <path d={path} fill="none" stroke={color} strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+      <path
+        d={path}
+        fill="none"
+        stroke={color}
+        strokeWidth="1.4"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
     </svg>
   );
 }

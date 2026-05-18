@@ -15,11 +15,22 @@ export interface HistoricalPoint {
   close: number;
 }
 
+export interface FetchQuotesOptions {
+  /**
+   * Bypass the in-memory quote cache. Set on the explicit user "Refresh
+   * quotes" path so a click after a recent fetch still triggers a fresh
+   * network round-trip (otherwise the 5-minute TTL turns the button into
+   * a silent no-op). Auto-driven refreshes (e.g. portfolio rebuilds) leave
+   * this false so we don't pound the upstream.
+   */
+  force?: boolean;
+}
+
 export interface QuoteProvider {
   id: string;
   name: string;
   /** Live quotes for a batch of symbols. Implementations must batch to one request when possible. */
-  fetchQuotes(symbols: string[]): Promise<Quote[]>;
+  fetchQuotes(symbols: string[], opts?: FetchQuotesOptions): Promise<Quote[]>;
   /** Daily close history for a single symbol, range expressed in years. */
   fetchHistory(symbol: string, years: number): Promise<HistoricalPoint[]>;
 }

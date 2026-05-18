@@ -27,7 +27,7 @@ jobs:
             label: macOS (arm64)
             rust-target: aarch64-apple-darwin
             tauri-args: '--target aarch64-apple-darwin --bundles app'
-          - platform: macos-13
+          - platform: macos-15-intel
             label: macOS (x64 Intel)
             rust-target: x86_64-apple-darwin
             tauri-args: '--target x86_64-apple-darwin --bundles app'
@@ -110,12 +110,12 @@ jobs:
       # Sorhus's npm `create-dmg`, which works reliably on both arm64 and
       # x64 macOS runners.
       - name: Bundle macOS DMG via create-dmg
-        if: matrix.platform == 'macos-latest' || matrix.platform == 'macos-13'
+        if: matrix.platform == 'macos-latest' || matrix.platform == 'macos-15-intel'
         working-directory: app
         run: npm run bundle:dmg
 
       - name: Upload macOS DMG to draft release
-        if: matrix.platform == 'macos-latest' || matrix.platform == 'macos-13'
+        if: matrix.platform == 'macos-latest' || matrix.platform == 'macos-15-intel'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         working-directory: app

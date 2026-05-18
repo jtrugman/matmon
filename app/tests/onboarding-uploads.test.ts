@@ -45,12 +45,19 @@ describe('Onboarding multi-account ingestion', () => {
     expect(hsa.accountTypeHint).toBe('hsa');
   });
 
-  it('single-account file leaves accountsDetected undefined', () => {
+  it('single-account Fidelity file is rejected at the import gate (no Account Number)', () => {
+    // Matmon ONLY accepts the multi-account Fidelity export. A file shaped
+    // like Fidelity (Run Date / Action / Symbol etc.) but with no Account /
+    // Account Number column is rejected up front so the user can re-download
+    // the right export. See src/lib/importers/fidelity.ts → detectSingleAccountFidelityRejection.
     const singleAccount = `Run Date,Action,Symbol,Description,Type,Price ($),Quantity,Commission ($),Fees ($),Accrued Interest ($),Amount ($),Cash Balance ($),Settlement Date
 05/02/2026,"YOU BOUGHT VOO",VOO,"VANGUARD S&P 500 ETF",Cash,556.18,4,,,,-2224.72,100.00,05/03/2026`;
     const r = importCsv(singleAccount);
-    expect(r.importerId).toBe('fidelity');
+    expect(r.importerId).toBeNull();
+    expect(r.transactions).toHaveLength(0);
     expect(r.accountsDetected).toBeUndefined();
+    expect(r.rejectionReason).toBeDefined();
+    expect(r.rejectionKind).toBe('wrong-fidelity-export');
   });
 
   it('detected accounts carry their account numbers for canonical naming', () => {

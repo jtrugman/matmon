@@ -27,11 +27,11 @@ type Case = {
 };
 
 const CASES: Case[] = [
-  { dir: 'fidelity',      importerId: 'fidelity',      brokerage: 'Fidelity',       accountType: 'taxable'  },
-  { dir: 'schwab',        importerId: 'schwab',        brokerage: 'Charles Schwab', accountType: 'roth_ira' },
-  { dir: 'jpmorgan',      importerId: 'jpmorgan',      brokerage: 'JP Morgan',      accountType: 'taxable'  },
-  { dir: 'jpmHoldings',   importerId: 'jpmHoldings',   brokerage: 'JP Morgan',      accountType: 'taxable'  },
-  { dir: 'humanInterest', importerId: 'humanInterest', brokerage: 'Human Interest', accountType: '401k'     },
+  { dir: 'fidelity', importerId: 'fidelity', brokerage: 'Fidelity', accountType: 'taxable' },
+  { dir: 'schwab', importerId: 'schwab', brokerage: 'Charles Schwab', accountType: 'roth_ira' },
+  { dir: 'jpmorgan', importerId: 'jpmorgan', brokerage: 'JP Morgan', accountType: 'taxable' },
+  { dir: 'jpmHoldings', importerId: 'jpmHoldings', brokerage: 'JP Morgan', accountType: 'taxable' },
+  { dir: 'humanInterest', importerId: 'humanInterest', brokerage: 'Human Interest', accountType: '401k' },
 ];
 
 async function makeAccount(id: string, brokerage: string, accountType: string) {

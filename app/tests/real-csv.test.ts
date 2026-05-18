@@ -24,28 +24,24 @@ const haveSchwabTransactions = existsSync(FILES.schwabTransactions);
 const haveJpmHoldings = existsSync(FILES.jpmHoldings);
 
 if (!haveExamples) {
-  // eslint-disable-next-line no-console
   console.info('[real-csv.test] example_csv/ not present, skipping real-CSV smoke tests.');
 }
 
 (haveExamples ? describe : describe.skip)('real brokerage CSVs', () => {
-  it('single_account_fidelity.csv: detects as Fidelity, parses rows, no unmapped actions', () => {
+  it('single_account_fidelity.csv: rejected at the import gate with a "wrong-fidelity-export" kind', () => {
+    // Matmon ONLY accepts the Fidelity MULTI-account transaction history
+    // export. Single-account exports omit the Account Number column entirely
+    // and break the dedup fingerprint we use to keep accounts organized
+    // across re-imports. The user-facing message points the user at the
+    // "All Accounts" download in Fidelity's UI.
     const result = importCsv(readFileSync(FILES.singleFidelity, 'utf8'));
-    expect(result.importerId).toBe('fidelity');
-    expect(result.transactions.length).toBeGreaterThan(0);
-    expect(result.unmappedActionStrings).toEqual([]);
-    expect(result.inferences.actionsUnknown).toBe(0);
-    // Single-account exports must NOT trigger the multi-account picker.
+    expect(result.importerId).toBeNull();
+    expect(result.transactions).toHaveLength(0);
+    expect(result.rejectionReason).toBeDefined();
+    expect(result.rejectionReason!).toMatch(/multi-account export/i);
+    expect(result.rejectionReason!).toMatch(/All Accounts/);
+    expect(result.rejectionKind).toBe('wrong-fidelity-export');
     expect(result.accountsDetected).toBeUndefined();
-    expect(result.rejectionReason).toBeUndefined();
-  });
-
-  it('single_account_fidelity.csv: cash-transfer rows with literal-space Symbol become null', () => {
-    const result = importCsv(readFileSync(FILES.singleFidelity, 'utf8'));
-    // The "Electronic Funds Transfer Received" rows have Symbol=" " in the file.
-    const efts = result.transactions.filter(t => t.action === 'cash_in');
-    expect(efts.length).toBeGreaterThan(0);
-    for (const t of efts) expect(t.symbol).toBeNull();
   });
 
   it('multiple_accounts_fidelity.csv: detects as Fidelity with 2+ accountsDetected entries', () => {

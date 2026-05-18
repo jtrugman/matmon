@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   BACKUP_TABLES,
   BACKUP_VERSION,
+  TABLE_COLUMNS,
   countRows,
   eraseEverything,
   exportAll,
@@ -48,7 +49,9 @@ function account(overrides: Partial<AccountRow> = {}): AccountRow {
 
 async function seed(): Promise<void> {
   await insertAccount(account());
-  await insertAccount(account({ id: 'sch-roth', name: 'Schwab Roth', brokerage: 'Schwab', account_type: 'roth_ira' }));
+  await insertAccount(
+    account({ id: 'sch-roth', name: 'Schwab Roth', brokerage: 'Schwab', account_type: 'roth_ira' }),
+  );
   await insertTransactions('fid-tax', [
     tx({ rawHash: 'fid-1' }),
     tx({ rawHash: 'fid-2', symbol: 'VTI', quantity: 5, price: 220 }),
@@ -75,9 +78,7 @@ describe('backup · exportAll', () => {
     const payload = await exportAll();
     expect(payload.tables.accounts).toHaveLength(2);
     expect(payload.tables.transactions).toHaveLength(3);
-    expect(payload.tables.settings).toEqual(
-      expect.arrayContaining([{ key: 'theme', value: 'dark' }]),
-    );
+    expect(payload.tables.settings).toEqual(expect.arrayContaining([{ key: 'theme', value: 'dark' }]));
   });
 
   it('countRows sums across tables', async () => {
@@ -136,6 +137,96 @@ describe('backup · eraseEverything', () => {
     for (const t of BACKUP_TABLES) {
       expect(payload.tables[t]).toEqual([]);
     }
+  });
+});
+
+describe('backup · column allowlist (SQL injection guard)', () => {
+  it('drops unknown column keys from imported account rows', async () => {
+    // Simulate a malicious / corrupt backup that smuggles an extra "column"
+    // whose NAME contains a SQL fragment. The fix is to intersect each row's
+    // keys with the per-table schema allowlist before interpolating any
+    // identifier into SQL. Unknown keys must be silently dropped so neither
+    // the Tauri path nor the browser shim retains the bogus value.
+    const payload = {
+      version: BACKUP_VERSION,
+      exportedAt: new Date().toISOString(),
+      tables: {
+        accounts: [
+          {
+            id: 'acct-allowed',
+            name: 'Fidelity Taxable',
+            brokerage: 'Fidelity',
+            account_type: 'taxable',
+            currency: 'USD',
+            created_at: '2024-01-01T00:00:00.000Z',
+            // Injection attempts. None of these are real columns on the
+            // accounts table and they must be stripped before any INSERT.
+            'name); DROP TABLE accounts; --': 'pwn',
+            secret_admin_flag: 1,
+            password: 'hunter2',
+          },
+        ],
+        transactions: [],
+        prices: [],
+        symbol_metadata: [],
+        achievements: [],
+        scenarios: [],
+        user_profile: [],
+        tax_constants: [],
+        settings: [],
+      },
+    };
+    await importBackupFromPayload(payload);
+
+    // The accounts table still exists (the injection didn't drop it) and
+    // round-trips back with ONLY the schema-allowlisted columns.
+    const round = await exportAll();
+    const accounts = round.tables.accounts as Record<string, unknown>[];
+    expect(accounts).toHaveLength(1);
+    const row = accounts[0];
+    expect(row.id).toBe('acct-allowed');
+    expect(row.name).toBe('Fidelity Taxable');
+    expect(row.brokerage).toBe('Fidelity');
+    // Every retained key must be a known schema column.
+    const allowed = new Set(TABLE_COLUMNS.accounts);
+    for (const k of Object.keys(row)) expect(allowed.has(k)).toBe(true);
+    // None of the injection keys survived.
+    expect(row['name); DROP TABLE accounts; --']).toBeUndefined();
+    expect(row.secret_admin_flag).toBeUndefined();
+    expect(row.password).toBeUndefined();
+  });
+
+  it('drops unknown column keys from imported settings rows too', async () => {
+    const payload = {
+      version: BACKUP_VERSION,
+      exportedAt: new Date().toISOString(),
+      tables: {
+        accounts: [],
+        transactions: [],
+        prices: [],
+        symbol_metadata: [],
+        achievements: [],
+        scenarios: [],
+        user_profile: [],
+        tax_constants: [],
+        settings: [
+          {
+            key: 'theme',
+            value: 'dark',
+            // Bogus identifier-position payload.
+            'value FROM settings UNION SELECT name': 'attack',
+          },
+        ],
+      },
+    };
+    await importBackupFromPayload(payload);
+    const round = await exportAll();
+    const settings = round.tables.settings as Record<string, unknown>[];
+    expect(settings).toHaveLength(1);
+    const allowed = new Set(TABLE_COLUMNS.settings);
+    for (const k of Object.keys(settings[0])) expect(allowed.has(k)).toBe(true);
+    expect(settings[0].key).toBe('theme');
+    expect(settings[0].value).toBe('dark');
   });
 });
 

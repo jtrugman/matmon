@@ -1,7 +1,7 @@
 [package]
 name = "matmon"
 version = "0.1.0"
-description = "Matmon — private, beautiful, fun portfolio tracker"
+description = "Matmon, a private, beautiful, fun portfolio tracker"
 authors = ["Justin Trugman"]
 edition = "2021"
 

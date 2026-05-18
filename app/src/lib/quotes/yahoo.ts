@@ -9,7 +9,13 @@
 // exponential backoff (1s then 3s), and successful quotes are cached for 5 minutes so
 // rapid re-refreshes don't pound the upstream.
 
-import type { HistoricalPoint, NetworkLogEntry, Quote, QuoteProvider } from './types';
+import type {
+  FetchQuotesOptions,
+  HistoricalPoint,
+  NetworkLogEntry,
+  Quote,
+  QuoteProvider,
+} from './types';
 import { networkLog } from './log';
 
 const QUOTE_HOST = 'query1.finance.yahoo.com';
@@ -38,8 +44,26 @@ export function clearQuoteCache(): void {
 
 // ---------- Tiny inline helpers ----------
 
-/** Minimal FIFO semaphore. acquire() resolves when a slot is free; release() frees it. */
-function createSemaphore(max: number) {
+/**
+ * Minimal FIFO semaphore. acquire() resolves when a slot is free; release()
+ * frees it.
+ *
+ * Slot ownership transfer: when a waiter is woken from release(), the slot
+ * is HANDED to that waiter rather than freed and re-acquired. If we instead
+ * decremented `active` and then woke a waiter, a concurrent acquire() that
+ * runs between the decrement and the waiter's `active++` would observe
+ * `active < max`, grab the slot, and then the woken waiter would push
+ * `active` to `max + 1`, exceeding the concurrency cap.
+ *
+ * So:
+ *   - acquire() bumps `active` itself when no waiter is queued. When woken
+ *     via the waiter queue, the slot is already counted on its behalf, so it
+ *     must NOT bump `active` again.
+ *   - release() decrements `active` only when there are no waiters. If
+ *     there is a waiter, it transfers ownership of the slot by waking the
+ *     waiter and leaving `active` untouched.
+ */
+export function createSemaphore(max: number) {
   let active = 0;
   const waiters: Array<() => void> = [];
   return {
@@ -48,18 +72,54 @@ function createSemaphore(max: number) {
         active++;
         return;
       }
+      // Queue and wait. When release() wakes us, the slot is already counted.
       await new Promise<void>(resolve => waiters.push(resolve));
-      active++;
     },
     release(): void {
-      active--;
       const next = waiters.shift();
-      if (next) next();
+      if (next) {
+        // Transfer the slot to the woken waiter. `active` stays the same so
+        // a concurrent acquire() can't slip in and overshoot the cap.
+        next();
+        return;
+      }
+      active--;
+    },
+    // Test helpers (read-only). Kept tiny so the production object isn't a class.
+    _active(): number {
+      return active;
+    },
+    _waiterCount(): number {
+      return waiters.length;
     },
   };
 }
 
 const requestSemaphore = createSemaphore(CONCURRENCY);
+
+/**
+ * Internal hooks for the historical backfill module ({@link ./history.ts}).
+ * Exposed so the history fetcher can reuse the same concurrency cap and the
+ * same timeout/retry wrapper as the live-quote path: we do NOT want two
+ * separate pools of in-flight Yahoo requests fighting over rate-limits. Kept
+ * underscore-prefixed to flag that this is not a public API.
+ */
+export const _historyInternals = {
+  requestSemaphore,
+  getWithTimeoutAndRetry,
+};
+
+/**
+ * Same shape as _historyInternals, intended for the sector / instruments
+ * fetcher in ./sector.ts. The split is purely organizational: both modules
+ * need the semaphore + getWithTimeoutAndRetry combo, neither should touch
+ * the live-quote path. Kept as an alias so a future reorganization can
+ * remove one of the two without breaking the other.
+ */
+export const _sectorInternals = {
+  requestSemaphore,
+  getWithTimeoutAndRetry,
+};
 
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -245,19 +305,29 @@ export const yahooProvider: QuoteProvider = {
   id: 'yahoo',
   name: 'Yahoo Finance',
 
-  async fetchQuotes(symbols): Promise<Quote[]> {
+  async fetchQuotes(symbols, opts?: FetchQuotesOptions): Promise<Quote[]> {
     if (symbols.length === 0) return [];
 
     // Pull fresh hits straight from the cache. Only the stale symbols hit the network.
+    // When the caller passes { force: true } (the explicit "Refresh quotes"
+    // button), we skip the cache entirely so the user always sees a real
+    // round-trip happen. Without this flag a click within the 5-minute TTL
+    // would silently short-circuit, which is exactly the symptom Justin
+    // reported as "Refresh quotes doesn't seem to do anything".
+    const force = opts?.force === true;
     const now = Date.now();
     const fresh: Quote[] = [];
     const toFetch: string[] = [];
-    for (const s of symbols) {
-      const hit = quoteCache.get(s);
-      if (hit && now - hit.cachedAt < CACHE_TTL_MS) {
-        fresh.push(hit.quote);
-      } else {
-        toFetch.push(s);
+    if (force) {
+      for (const s of symbols) toFetch.push(s);
+    } else {
+      for (const s of symbols) {
+        const hit = quoteCache.get(s);
+        if (hit && now - hit.cachedAt < CACHE_TTL_MS) {
+          fresh.push(hit.quote);
+        } else {
+          toFetch.push(s);
+        }
       }
     }
 

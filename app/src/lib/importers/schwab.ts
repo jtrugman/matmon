@@ -14,7 +14,9 @@ export const schwabImporter: BrokerageImporter = {
     const hasDate = h.includes('date');
     const hasAction = h.includes('action');
     const hasSymbol = h.includes('symbol');
-    const hasFeesComm = h.some(x => x.includes('fees & comm') || x === 'commission' || x.includes('fees and comm'));
+    const hasFeesComm = h.some(
+      x => x.includes('fees & comm') || x === 'commission' || x.includes('fees and comm'),
+    );
     return hasDate && hasAction && hasSymbol && hasFeesComm;
   },
   parse(rows): ImporterResult {
@@ -45,7 +47,9 @@ export const schwabImporter: BrokerageImporter = {
       const symbol = (row['Symbol'] || '').trim() || null;
       const quantity = parseNumber(row['Quantity']);
       const price = parseNumber(row['Price']);
-      const fees = parseNumber(row['Fees & Comm'] || row['Fees & Commissions'] || row['Commission'] || row['Fees and Comm']);
+      const fees = parseNumber(
+        row['Fees & Comm'] || row['Fees & Commissions'] || row['Commission'] || row['Fees and Comm'],
+      );
       const amount = parseNumber(row['Amount']);
 
       if (symbol) symbols.add(symbol);

@@ -9,7 +9,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { MATMON_DATA } from '../src/data';
+import { MATMON_DATA } from './__fixtures__/sampleData';
 import { HoldingsView } from '../src/views/HoldingsView';
 
 function symbolOrderFromTable(): string[] {
@@ -26,9 +26,7 @@ describe('HoldingsView column sort', () => {
     expect(valueHeader.textContent).toMatch(/↓/);
 
     const order = symbolOrderFromTable();
-    const valuesInOrder = order.map(
-      sym => MATMON_DATA.holdings.find(h => h.sym === sym)!.value,
-    );
+    const valuesInOrder = order.map(sym => MATMON_DATA.holdings.find(h => h.sym === sym)!.value);
     // Descending: each value should be <= the previous one.
     for (let i = 1; i < valuesInOrder.length; i++) {
       expect(valuesInOrder[i]).toBeLessThanOrEqual(valuesInOrder[i - 1]);
@@ -66,9 +64,7 @@ describe('HoldingsView column sort', () => {
     const expected = [...after].sort((a, b) => a.localeCompare(b));
     expect(after).toEqual(expected);
 
-    expect(
-      screen.getByRole('columnheader', { name: /Symbol/ }).textContent,
-    ).toMatch(/↑/);
+    expect(screen.getByRole('columnheader', { name: /Symbol/ }).textContent).toMatch(/↑/);
   });
 
   it('clicking a header does NOT trigger row onSelect navigation', async () => {
@@ -100,26 +96,16 @@ describe('HoldingsView column sort', () => {
 
     const sectorHeader = screen.getByRole('columnheader', { name: /Sector/ });
     await userEvent.click(sectorHeader);
-    expect(
-      screen.getByRole('columnheader', { name: /Sector/ }).textContent,
-    ).toMatch(/[↑↓]/);
+    expect(screen.getByRole('columnheader', { name: /Sector/ }).textContent).toMatch(/[↑↓]/);
 
     const pctHeader = screen.getByRole('columnheader', { name: /^\s*%/ });
     await userEvent.click(pctHeader);
-    expect(
-      screen.getByRole('columnheader', { name: /^\s*%/ }).textContent,
-    ).toMatch(/[↑↓]/);
+    expect(screen.getByRole('columnheader', { name: /^\s*%/ }).textContent).toMatch(/[↑↓]/);
   });
 
   it('sort works in the filtered (account-detail) HoldingsView too', async () => {
     // fid-tax holds VTI, VXUS, AAPL, SPAXX in the demo data.
-    render(
-      <HoldingsView
-        data={MATMON_DATA}
-        filterAccountId="fid-tax"
-        onBack={() => {}}
-      />,
-    );
+    render(<HoldingsView data={MATMON_DATA} filterAccountId="fid-tax" onBack={() => {}} />);
 
     const onlyExpected = MATMON_DATA.holdings
       .filter(h => h.account === 'fid-tax')

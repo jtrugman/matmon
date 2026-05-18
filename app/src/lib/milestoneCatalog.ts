@@ -311,7 +311,7 @@ export const MILESTONE_BY_KEY: Record<string, MilestoneCatalogEntry> = Object.fr
  * catalog that has a concrete trigger implemented in `milestones.ts`. The watcher
  * imports this list so adding a new detectable milestone is one place to edit.
  *
- * Catalog entries that are NOT in this list show up as silhouettes only — they
+ * Catalog entries that are NOT in this list show up as silhouettes only; they
  * become detectable once we wire up the underlying signal.
  */
 export const WATCHED_MILESTONE_KEYS: ReadonlySet<string> = new Set([

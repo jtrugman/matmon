@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { yahooProvider } from '../src/lib/quotes/yahoo';
+import { yahooProvider, createSemaphore } from '../src/lib/quotes/yahoo';
 import { networkLog } from '../src/lib/quotes/log';
 import { getProvider, setOffline, isOffline, clearQuoteCache } from '../src/lib/quotes';
 
@@ -53,9 +53,13 @@ describe('Yahoo provider', () => {
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation((u: any) => {
       const url = String(u);
       if (url.includes('/AAPL')) {
-        return Promise.resolve(new Response(JSON.stringify(chartPayloadFor('AAPL', 248.3, 246.2)), { status: 200 }) as any);
+        return Promise.resolve(
+          new Response(JSON.stringify(chartPayloadFor('AAPL', 248.3, 246.2)), { status: 200 }) as any,
+        );
       }
-      return Promise.resolve(new Response(JSON.stringify(chartPayloadFor('VTI', 318.45, 319.5)), { status: 200 }) as any);
+      return Promise.resolve(
+        new Response(JSON.stringify(chartPayloadFor('VTI', 318.45, 319.5)), { status: 200 }) as any,
+      );
     });
     const quotes = await yahooProvider.fetchQuotes(['AAPL', 'VTI']);
     expect(fetchMock).toHaveBeenCalledTimes(2);
@@ -130,6 +134,76 @@ describe('Yahoo provider', () => {
       new Response('<html>blocked</html>', { status: 200 }) as any,
     );
     await expect(yahooProvider.fetchQuotes(['AAPL'])).rejects.toThrow(/non-JSON/i);
+  });
+
+  it('parses mutual-fund-shape chart response (no chartPreviousClose, only NAV closes)', async () => {
+    // VITAX is a mutual fund: the Yahoo chart endpoint returns the same v8
+    // wrapper but `meta.chartPreviousClose` is absent (mutual funds only
+    // settle once daily, so there's no intraday "previous close" the way
+    // there is for equities). The parser must:
+    //   - read meta.regularMarketPrice for the current price
+    //   - fall back to meta.previousClose (or finally to price itself) when
+    //     chartPreviousClose is missing
+    //   - never throw on the missing field
+    const mutualFundPayload = {
+      chart: {
+        result: [
+          {
+            meta: {
+              symbol: 'VITAX',
+              currency: 'USD',
+              regularMarketPrice: 464.5,
+              previousClose: 462.1,
+              // chartPreviousClose intentionally absent
+              shortName: 'Vanguard Information Technology Index Fund',
+            },
+            timestamp: [1_700_000_000, 1_700_086_400, 1_700_172_800],
+            indicators: { quote: [{ close: [460.0, 462.1, 464.5] }] },
+          },
+        ],
+      },
+    };
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(JSON.stringify(mutualFundPayload), { status: 200 }) as any,
+    );
+    const out = await yahooProvider.fetchQuotes(['VITAX']);
+    expect(out).toHaveLength(1);
+    expect(out[0].symbol).toBe('VITAX');
+    expect(out[0].price).toBe(464.5);
+    // chartPreviousClose missing → falls back to previousClose
+    expect(out[0].prevClose).toBe(462.1);
+    expect(out[0].dayChange).toBeCloseTo(2.4, 2);
+  });
+
+  it('parses mutual-fund-shape response with NO previousClose either (uses price as a safe fallback)', async () => {
+    // The absolute worst-case mutual-fund response: meta has only the
+    // regularMarketPrice. Parser must not throw; prevClose = price means
+    // dayChange = 0, which is the right semantics (no data → no movement).
+    const minimalPayload = {
+      chart: {
+        result: [
+          {
+            meta: {
+              symbol: 'VITAX',
+              currency: 'USD',
+              regularMarketPrice: 464.5,
+            },
+            timestamp: [1_700_000_000],
+            indicators: { quote: [{ close: [464.5] }] },
+          },
+        ],
+      },
+    };
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(JSON.stringify(minimalPayload), { status: 200 }) as any,
+    );
+    const out = await yahooProvider.fetchQuotes(['VITAX']);
+    expect(out).toHaveLength(1);
+    expect(out[0].price).toBe(464.5);
+    // No prevClose data → equals price (the parser's fallback path), so
+    // dayChange resolves to 0 rather than NaN.
+    expect(out[0].prevClose).toBe(464.5);
+    expect(out[0].dayChange).toBe(0);
   });
 
   // ----- Resilience: concurrency / timeout / retry / cache / partial failure -----
@@ -238,9 +312,11 @@ describe('Yahoo provider', () => {
   });
 
   it('cache hit: second fetchQuotes inside the TTL skips the network', async () => {
-    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
-      new Response(JSON.stringify(chartPayloadFor('AAPL', 248.3, 246.2)), { status: 200 }) as any,
-    );
+    const fetchMock = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(
+        new Response(JSON.stringify(chartPayloadFor('AAPL', 248.3, 246.2)), { status: 200 }) as any,
+      );
     const first = await yahooProvider.fetchQuotes(['AAPL']);
     const second = await yahooProvider.fetchQuotes(['AAPL']);
     expect(fetchMock).toHaveBeenCalledTimes(1);
@@ -252,14 +328,38 @@ describe('Yahoo provider', () => {
 
   it('clearQuoteCache forces the next fetchQuotes back to the network', async () => {
     // Mint a fresh Response per call: happy-dom errors if a body is consumed twice.
-    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(() =>
-      Promise.resolve(
-        new Response(JSON.stringify(chartPayloadFor('AAPL', 248.3, 246.2)), { status: 200 }) as any,
-      ),
-    );
+    const fetchMock = vi
+      .spyOn(globalThis, 'fetch')
+      .mockImplementation(() =>
+        Promise.resolve(
+          new Response(JSON.stringify(chartPayloadFor('AAPL', 248.3, 246.2)), { status: 200 }) as any,
+        ),
+      );
     await yahooProvider.fetchQuotes(['AAPL']);
     clearQuoteCache();
     await yahooProvider.fetchQuotes(['AAPL']);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('force: true bypasses the cache so explicit user refreshes always hit the network', async () => {
+    // Regression: without the force flag, the second click inside the 5-minute
+    // TTL is a silent no-op (Justin's "Refresh quotes doesn't seem to do
+    // anything" symptom). With force the cache is skipped on demand.
+    const fetchMock = vi
+      .spyOn(globalThis, 'fetch')
+      .mockImplementation(() =>
+        Promise.resolve(
+          new Response(JSON.stringify(chartPayloadFor('AAPL', 248.3, 246.2)), { status: 200 }) as any,
+        ),
+      );
+    // First call populates the cache (one network hit).
+    await yahooProvider.fetchQuotes(['AAPL']);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    // Second call without force: cache hit, no network.
+    await yahooProvider.fetchQuotes(['AAPL']);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    // Third call WITH force: cache bypassed, network hit again.
+    await yahooProvider.fetchQuotes(['AAPL'], { force: true });
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
@@ -334,6 +434,91 @@ describe('Network log ring buffer', () => {
     networkLog.clear();
     expect(networkLog.list()).toHaveLength(0);
     expect(calls).toBe(1);
+  });
+});
+
+describe('Semaphore slot ownership', () => {
+  // The previous semaphore decremented `active` in release() unconditionally
+  // before waking a waiter. A concurrent acquire() in between would see
+  // `active < max`, grab the slot, and the woken waiter would then push
+  // `active` past `max`, exceeding the concurrency cap. The fix transfers
+  // the slot directly to the waker so `active` stays at `max` while there is
+  // a queue.
+  it('peak active never exceeds max under contended acquire/release', async () => {
+    const max = 4;
+    const sem = createSemaphore(max) as ReturnType<typeof createSemaphore> & {
+      _active(): number;
+      _waiterCount(): number;
+    };
+    const total = 20;
+
+    // Acquire all `total` slots concurrently. The first `max` resolve
+    // synchronously; the rest queue up as waiters.
+    const acquires = Array.from({ length: total }, () => sem.acquire());
+    // Yield so the synchronous acquires settle.
+    await Promise.resolve();
+    expect(sem._active()).toBe(max);
+    expect(sem._waiterCount()).toBe(total - max);
+
+    let peak = sem._active();
+    // Drain the queue one slot at a time. Between each release and the
+    // resumed waiter actually running, fire a fresh acquire that races for
+    // the slot. The fix is what guarantees this newcomer queues rather than
+    // overshooting: with the old code, release decremented `active` to 3,
+    // the newcomer observed active < max and bumped to 4, then the queued
+    // waiter resumed and bumped to 5, blowing the cap. With the fix, the
+    // newcomer always queues (the waker owns the slot), so `active` never
+    // climbs above `max`.
+    for (let i = 0; i < total; i++) {
+      sem.release();
+      // The racer that should NOT slip past the queued waiter.
+      const racer = sem.acquire();
+      // Yield enough microtasks for any awaits to land.
+      await Promise.resolve();
+      await Promise.resolve();
+      peak = Math.max(peak, sem._active());
+      // Don't await the racer here; it will resolve later via subsequent
+      // releases that drain the queue. Track it for cleanup at the end.
+      void racer;
+    }
+
+    // Drain the remaining queue (one release per still-queued waiter +
+    // racer). After all releases, active should be back at 0 and the queue
+    // empty.
+    while (sem._waiterCount() > 0) {
+      sem.release();
+      await Promise.resolve();
+      await Promise.resolve();
+      peak = Math.max(peak, sem._active());
+    }
+
+    expect(peak).toBe(max);
+    await Promise.all(acquires);
+  });
+
+  it('release wakes a waiter without bumping active above max', async () => {
+    const sem = createSemaphore(1) as ReturnType<typeof createSemaphore> & {
+      _active(): number;
+      _waiterCount(): number;
+    };
+    await sem.acquire();
+    expect(sem._active()).toBe(1);
+
+    let waiterRan = false;
+    const waiter = sem.acquire().then(() => {
+      waiterRan = true;
+    });
+    await Promise.resolve();
+    expect(sem._waiterCount()).toBe(1);
+
+    sem.release();
+    await waiter;
+    expect(waiterRan).toBe(true);
+    // After the wake, the slot belongs to the waiter; active stays at 1.
+    expect(sem._active()).toBe(1);
+
+    sem.release();
+    expect(sem._active()).toBe(0);
   });
 });
 

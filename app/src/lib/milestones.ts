@@ -52,34 +52,34 @@ const yearsBetween = (older: Date, newer: Date): number => {
 };
 
 // All detectable milestones. Keys MUST appear in `WATCHED_MILESTONE_KEYS` from
-// `milestoneCatalog.ts` — the catalog is the source of truth; the entries here
+// `milestoneCatalog.ts` (the catalog is the source of truth); the entries here
 // just bind each watched key to its trigger function. A constructor-time guard
 // at the bottom of this file blows up loudly if the two ever drift.
 const ALL_DEFS: MilestoneDef[] = [
   // Portfolio value thresholds (PRD §10)
-  { key: 'first_1k',            check: valueAtLeast(1_000) },
-  { key: 'first_10k',           check: valueAtLeast(10_000) },
-  { key: 'first_100k',          check: valueAtLeast(100_000) },
-  { key: 'first_500k',          check: valueAtLeast(500_000) },
-  { key: 'first_million',       check: valueAtLeast(1_000_000) },
-  { key: 'two_million',         check: valueAtLeast(2_000_000) },
-  { key: 'five_million',        check: valueAtLeast(5_000_000) },
-  { key: 'ten_million',         check: valueAtLeast(10_000_000) },
+  { key: 'first_1k', check: valueAtLeast(1_000) },
+  { key: 'first_10k', check: valueAtLeast(10_000) },
+  { key: 'first_100k', check: valueAtLeast(100_000) },
+  { key: 'first_500k', check: valueAtLeast(500_000) },
+  { key: 'first_million', check: valueAtLeast(1_000_000) },
+  { key: 'two_million', check: valueAtLeast(2_000_000) },
+  { key: 'five_million', check: valueAtLeast(5_000_000) },
+  { key: 'ten_million', check: valueAtLeast(10_000_000) },
   { key: 'twenty_five_million', check: valueAtLeast(25_000_000) },
-  { key: 'fifty_million',       check: valueAtLeast(50_000_000) },
-  { key: 'hundred_million',     check: valueAtLeast(100_000_000) },
-  { key: 'quarter_billion',     check: valueAtLeast(250_000_000) },
-  { key: 'half_billion',        check: valueAtLeast(500_000_000) },
-  { key: 'first_billion',       check: valueAtLeast(1_000_000_000) },
+  { key: 'fifty_million', check: valueAtLeast(50_000_000) },
+  { key: 'hundred_million', check: valueAtLeast(100_000_000) },
+  { key: 'quarter_billion', check: valueAtLeast(250_000_000) },
+  { key: 'half_billion', check: valueAtLeast(500_000_000) },
+  { key: 'first_billion', check: valueAtLeast(1_000_000_000) },
 
   // Activity milestones
-  { key: 'first_import',        check: s => s.accountCount >= 1 },
-  { key: '100_transactions',    check: s => s.transactionCount >= 100 },
+  { key: 'first_import', check: s => s.accountCount >= 1 },
+  { key: '100_transactions', check: s => s.transactionCount >= 100 },
 
   // Dividend milestones
-  { key: 'first_dividend',      check: s => s.dividendCount >= 1 },
-  { key: '100_in_dividends',    check: s => s.dividendTotal >= 100 },
-  { key: '1k_in_dividends',     check: s => s.dividendTotal >= 1_000 },
+  { key: 'first_dividend', check: s => s.dividendCount >= 1 },
+  { key: '100_in_dividends', check: s => s.dividendTotal >= 100 },
+  { key: '1k_in_dividends', check: s => s.dividendTotal >= 1_000 },
 
   // Diversification: 10+ holdings across 3+ distinct sectors
   {
@@ -133,20 +133,98 @@ export function detectNewUnlocks(state: PortfolioState, alreadyUnlocked: Set<str
  * Collects the inputs the milestone checks need from the DB + the already-built
  * portfolio. Centralized here so the React hook just calls one function.
  */
-export async function collectPortfolioState(holdings: Holding[], totalValue: number, now: Date = new Date()): Promise<PortfolioState> {
-  const [accounts, txs] = await Promise.all([listAccounts(), listTransactions()]);
+// Dedupe window for pairing a `dividend` (cash payout) with its same-symbol
+// `div_reinvest` (the reinvestment of that exact cash). Fidelity and a few
+// others emit BOTH rows for a single income event: the cash dividend on one
+// line, the share purchase on the next. Counting both would double the
+// dividendTotal. Three days is generous enough to cover settlement timing
+// while staying tight enough to avoid colliding with the next month's payout.
+const DIVIDEND_PAIR_WINDOW_DAYS = 3;
+const DIVIDEND_PAIR_TOLERANCE = 0.5;
+const MS_PER_DAY_MILESTONES = 24 * 60 * 60 * 1000;
+
+/**
+ * Sum dividend income while AVOIDING the double-count when a brokerage emits
+ * a paired (cash dividend, reinvestment) for the same income event.
+ *
+ * Rule (the "why" comment that's load-bearing, do not delete):
+ *   - Every `dividend` row contributes its magnitude to the total.
+ *   - A `div_reinvest` row contributes ONLY IF there's no matching
+ *     `dividend` row within +/- DIVIDEND_PAIR_WINDOW_DAYS for the same
+ *     symbol whose magnitude matches within DIVIDEND_PAIR_TOLERANCE.
+ *   - When a `div_reinvest` appears alone (e.g. some brokerages collapse the
+ *     two-row pattern into the share-purchase row only), the reinvestment IS
+ *     the only signal of income and DOES count.
+ *
+ * Returns the dedupe-applied total along with the (also dedupe-applied) count
+ * so the "first dividend" milestone fires on real income events, not on the
+ * brokerage's accounting artifacts.
+ */
+export function tallyDividends(
+  txs: { date: string; action: string; symbol: string | null; quantity: number; price: number; amount: number | null }[],
+): { dividendCount: number; dividendTotal: number } {
+  const dividendRows: { date: number; symbol: string; magnitude: number; consumed: boolean }[] = [];
+  for (const t of txs) {
+    if (t.action !== 'dividend') continue;
+    const d = new Date(t.date).getTime();
+    if (Number.isNaN(d)) continue;
+    const sym = t.symbol ?? '';
+    const magnitude = t.amount != null ? Math.abs(t.amount) : t.quantity * t.price;
+    dividendRows.push({ date: d, symbol: sym, magnitude, consumed: false });
+  }
 
   let dividendCount = 0;
   let dividendTotal = 0;
-  let oldest: Date | null = null;
+  const windowMs = DIVIDEND_PAIR_WINDOW_DAYS * MS_PER_DAY_MILESTONES;
 
+  // First pass: every dividend row counts.
+  for (const row of dividendRows) {
+    dividendCount += 1;
+    dividendTotal += row.magnitude;
+  }
+
+  // Second pass: each div_reinvest counts ONLY if no matching dividend is
+  // nearby (same symbol, similar magnitude). Otherwise the dividend already
+  // captured the same income event.
   for (const t of txs) {
-    if (t.action === 'dividend' || t.action === 'div_reinvest') {
-      dividendCount += 1;
-      // Dividends record either an `amount` (cash payout) or qty*price (reinvest).
-      const amt = t.amount != null ? Math.abs(t.amount) : t.quantity * t.price;
-      dividendTotal += amt;
+    if (t.action !== 'div_reinvest') continue;
+    const d = new Date(t.date).getTime();
+    if (Number.isNaN(d)) continue;
+    const sym = t.symbol ?? '';
+    const magnitude = t.amount != null ? Math.abs(t.amount) : t.quantity * t.price;
+    if (magnitude <= 0) continue;
+
+    const matched = dividendRows.find(
+      r =>
+        !r.consumed &&
+        r.symbol === sym &&
+        Math.abs(r.date - d) <= windowMs &&
+        Math.abs(r.magnitude - magnitude) <= DIVIDEND_PAIR_TOLERANCE,
+    );
+    if (matched) {
+      matched.consumed = true;
+      continue;
     }
+    // Orphan reinvestment: no paired dividend row, so this IS the only
+    // signal of dividend income for this event.
+    dividendCount += 1;
+    dividendTotal += magnitude;
+  }
+
+  return { dividendCount, dividendTotal };
+}
+
+export async function collectPortfolioState(
+  holdings: Holding[],
+  totalValue: number,
+  now: Date = new Date(),
+): Promise<PortfolioState> {
+  const [accounts, txs] = await Promise.all([listAccounts(), listTransactions()]);
+
+  const { dividendCount, dividendTotal } = tallyDividends(txs);
+
+  let oldest: Date | null = null;
+  for (const t of txs) {
     const d = new Date(t.date);
     if (!Number.isNaN(d.getTime())) {
       if (oldest === null || d < oldest) oldest = d;
@@ -169,7 +247,11 @@ export async function collectPortfolioState(holdings: Holding[], totalValue: num
  * High-level entry point: gathers state, finds new unlocks, persists them, returns the keys that fired.
  * The hook calls this; the App uses the returned key to fire the milestone toast.
  */
-export async function unlockNew(holdings: Holding[], totalValue: number, now: Date = new Date()): Promise<string[]> {
+export async function unlockNew(
+  holdings: Holding[],
+  totalValue: number,
+  now: Date = new Date(),
+): Promise<string[]> {
   const [state, existing] = await Promise.all([
     collectPortfolioState(holdings, totalValue, now),
     listAchievements(),

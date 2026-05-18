@@ -1,12 +1,16 @@
 import { describe, expect, it } from 'vitest';
 import { detect, importCsv, parseWithColumnMap } from '../src/lib/importers';
 
-const FIDELITY = `Run Date,Action,Symbol,Description,Quantity,Price ($),Amount ($)
-05/02/2026,DIVIDEND RECEIVED,AAPL,APPLE INC,,,104.30
-04/29/2026,YOU BOUGHT,VOO,VANGUARD S&P 500 ETF,4,556.18,-2224.72
-04/26/2026,REINVESTMENT,BND,VANGUARD TOTAL BOND,0.214,72.94,-15.62
-04/22/2026,YOU SOLD,JEPI,JPM EQUITY PREMIUM INCOME ETF,30,61.84,1855.20
-04/15/2026,DIVIDEND RECEIVED,VTI,VANGUARD TOTAL STOCK MKT ETF,,,1620.42`;
+// Multi-account export shape (with Account + Account Number columns). Matmon
+// rejects Fidelity single-account exports at the import gate because they
+// omit the account number entirely (no fingerprint for dedupe), so every
+// Fidelity test fixture must carry the multi-account shape.
+const FIDELITY = `Run Date,Account,Account Number,Action,Symbol,Description,Quantity,Price ($),Amount ($)
+05/02/2026,Individual,Z00001234,DIVIDEND RECEIVED,AAPL,APPLE INC,,,104.30
+04/29/2026,Individual,Z00001234,YOU BOUGHT,VOO,VANGUARD S&P 500 ETF,4,556.18,-2224.72
+04/26/2026,Individual,Z00001234,REINVESTMENT,BND,VANGUARD TOTAL BOND,0.214,72.94,-15.62
+04/22/2026,Individual,Z00001234,YOU SOLD,JEPI,JPM EQUITY PREMIUM INCOME ETF,30,61.84,1855.20
+04/15/2026,Individual,Z00001234,DIVIDEND RECEIVED,VTI,VANGUARD TOTAL STOCK MKT ETF,,,1620.42`;
 
 const SCHWAB = `Date,Action,Symbol,Description,Quantity,Price,Fees & Comm,Amount
 08/15/2024,Buy,AAPL,APPLE INC,10,180.50,0.00,-1805.00
@@ -93,6 +97,78 @@ describe('Fidelity importer', () => {
   });
 });
 
+describe('Fidelity DISTRIBUTION with Type=Shares (share-based capital gains)', () => {
+  // FINDING (HIGH, FIXED): Fidelity reports a fund capital-gains distribution
+  // paid AS ADDITIONAL SHARES on a single row with action="DISTRIBUTION ..."
+  // and Type="Shares". Both Quantity and Amount are populated; the Price
+  // column is blank because the implicit per-share price is Amount/Quantity.
+  //
+  // Before the fix: the action mapper returned "dividend" (matching the
+  // /distribution/ rule), which the portfolio aggregator treats as a no-op
+  // for qty + cost. So a real $7,808.23 / 77.294-share distribution silently
+  // never reached the portfolio. A user importing the example Fidelity file
+  // saw cost basis off by ~$7.8K per account.
+  //
+  // After the fix: the Fidelity importer detects DISTRIBUTION + Type="Shares"
+  // + Quantity > 0 + Amount > 0, re-tags the action as transfer_in (NOT
+  // div_reinvest, because the user received shares with that cost basis,
+  // not cash income), and synthesizes a per-share price = Amount/Quantity.
+  // The portfolio aggregator adds the quantity to the position and the Amount
+  // to the cost basis; the dividend milestones / lifetime-dividend rollups
+  // correctly ignore it because it was not income.
+  // Multi-account shape (Account + Account Number columns). The actual
+  // share-distribution detection works regardless of how many accounts the
+  // file holds; using the multi-account shape here keeps the test consistent
+  // with the only Fidelity export shape Matmon accepts.
+  const SHARE_DISTRIBUTION = `Run Date,Account,Account Number,Action,Symbol,Description,Type,Price ($),Quantity,Commission ($),Fees ($),Accrued Interest ($),Amount ($),Cash Balance ($),Settlement Date
+04/21/2026,Individual,Z00001234,"DISTRIBUTION VANGUARD WORLD FD INF TECH ETF (VGT) (Cash)",VGT,"VANGUARD WORLD FD INF TECH ETF",Shares,,77.294,,,,7808.23,40.95,
+04/20/2026,Individual,Z00001234,"YOU BOUGHT VANGUARD WORLD FD INF TECH ETF (VGT) (Cash)",VGT,"VANGUARD WORLD FD INF TECH ETF",Cash,806.37,0.186,,,,-149.98,40.95,04/21/2026`;
+
+  it('re-tags share distribution as transfer_in and synthesizes per-share price', () => {
+    const result = importCsv(SHARE_DISTRIBUTION);
+    expect(result.importerId).toBe('fidelity');
+    expect(result.transactions).toHaveLength(2);
+    const dist = result.transactions.find(t => Math.abs(t.quantity - 77.294) < 1e-9)!;
+    expect(dist).toBeTruthy();
+    // Tagged as transfer_in so the dividend milestones and Lifetime Div
+    // rollups skip it; the portfolio aggregator still adds the qty + cost
+    // basis because transfer_in is treated the same as buy.
+    expect(dist.action).toBe('transfer_in');
+    // Implicit price = 7808.23 / 77.294 ≈ 101.0185...
+    expect(dist.price).toBeCloseTo(7808.23 / 77.294, 6);
+    // The amount is preserved verbatim from the CSV (positive cash equivalent).
+    expect(dist.amount).toBe(7808.23);
+  });
+
+  it('plain DIVIDEND RECEIVED (Type=Cash, qty=0) still classifies as dividend, NOT a share buy', () => {
+    // Counterexample: a Type=Cash distribution with no quantity must STAY a
+    // dividend (qty unchanged, cost unchanged). Only Type=Shares with non-zero
+    // qty + amount should flip to div_reinvest.
+    // Multi-account shape to satisfy Matmon's import gate (single-account
+    // Fidelity exports are rejected up front because they omit the account
+    // number used for dedup).
+    const CASH_DIV = `Run Date,Account,Account Number,Action,Symbol,Description,Type,Price ($),Quantity,Commission ($),Fees ($),Accrued Interest ($),Amount ($),Cash Balance ($),Settlement Date
+04/30/2026,Individual,Z00001234,"DIVIDEND RECEIVED FIDELITY TREASURY MONEY MARKET FUND (FZFXX) (Cash)",FZFXX,"FIDELITY TREASURY MONEY MARKET FUND",Cash,,0.000,,,,0.21,41.24,`;
+    const result = importCsv(CASH_DIV);
+    expect(result.transactions).toHaveLength(1);
+    expect(result.transactions[0].action).toBe('dividend');
+    expect(result.transactions[0].quantity).toBe(0);
+  });
+
+  it('re-importing produces identical rawHashes (dedupe via imported_from survives the share-dist remap)', () => {
+    // The rawHash includes the synthesized price, but the synthesis is a pure
+    // function of the row's (amount, quantity), so two imports of the same CSV
+    // text produce identical rawHashes for the share-distribution row. The DB
+    // insertTransactions() uses imported_from = rawHash for dedupe.
+    const r1 = importCsv(SHARE_DISTRIBUTION);
+    const r2 = importCsv(SHARE_DISTRIBUTION);
+    expect(r1.transactions.length).toBe(r2.transactions.length);
+    for (let i = 0; i < r1.transactions.length; i++) {
+      expect(r1.transactions[i].rawHash).toBe(r2.transactions[i].rawHash);
+    }
+  });
+});
+
 describe('Schwab importer', () => {
   const result = importCsv(SCHWAB);
 
@@ -135,6 +211,24 @@ describe('JP Morgan importer', () => {
 
   it('reports brokerage as JP Morgan', () => {
     expect(result.inferences.brokerage).toBe('JP Morgan');
+  });
+
+  it('does NOT match a generic CSV with matching headers but no JPM markers', () => {
+    // Before the fix, jpmorgan.matches() ended in `return looksLikeJpm || true`
+    // so any CSV with the four base headers (Trade Date / Transaction Type /
+    // Symbol / Net Amount) was claimed by JPM regardless of brokerage. The
+    // fix requires either a Settle Date column or "J.P. Morgan" in the row
+    // description. A synthetic Charles Schwab Bank CSV with the four base
+    // headers should fall through to no-match so the column-mapping wizard
+    // can take over instead of being silently parsed as JPM.
+    const SYNTHETIC = `Trade Date,Transaction Type,Symbol,Net Amount,Description
+2024-08-15,Purchase,VTI,-3750.00,Charles Schwab Bank · funds settlement
+2024-08-01,Dividend,VTI,32.40,Charles Schwab Bank · cash dividend`;
+    const { importer } = detect(SYNTHETIC);
+    expect(importer).toBeNull();
+    const result = importCsv(SYNTHETIC);
+    expect(result.importerId).toBeNull();
+    expect(result.transactions).toHaveLength(0);
   });
 });
 

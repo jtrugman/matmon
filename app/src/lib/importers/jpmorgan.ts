@@ -12,13 +12,22 @@ export const jpmImporter: BrokerageImporter = {
   matches(headers, firstRow) {
     const h = headers.map(x => x.toLowerCase());
     const hasTradeDate = h.includes('trade date') || h.includes('posting date');
-    const hasTxnType = h.some(x => x.includes('transaction type') || x.includes('activity type') || x === 'type');
+    const hasTxnType = h.some(
+      x => x.includes('transaction type') || x.includes('activity type') || x === 'type',
+    );
     const hasSymbol = h.includes('symbol') || h.includes('security symbol');
     const hasNetAmount = h.some(x => x.includes('net amount') || x === 'amount');
     if (!(hasTradeDate && hasTxnType && hasSymbol && hasNetAmount)) return false;
-    // Differentiate from Schwab/Fidelity that share some headers.
-    const looksLikeJpm = h.some(x => x.includes('settle date')) || JSON.stringify(firstRow).toLowerCase().includes('j.p. morgan');
-    return looksLikeJpm || true;
+    // Differentiate from Schwab/Fidelity that share some headers. Without
+    // this guard, any CSV with Trade Date / Transaction Type / Symbol /
+    // Net Amount columns would be parsed as JPM regardless of brokerage,
+    // so we require either a Settle Date column or a "J.P. Morgan" string
+    // in the first row's description. If neither matches, the importer
+    // registry falls through to the column-mapping wizard.
+    const looksLikeJpm =
+      h.some(x => x.includes('settle date')) ||
+      JSON.stringify(firstRow).toLowerCase().includes('j.p. morgan');
+    return looksLikeJpm;
   },
   parse(rows): ImporterResult {
     const txs: ParsedTransaction[] = [];

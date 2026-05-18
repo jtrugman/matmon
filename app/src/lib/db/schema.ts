@@ -1,85 +1,89 @@
 // SQL schema applied on first open. Idempotent (CREATE IF NOT EXISTS).
-// Mirrors the data model in the PRD §8.
+//
+// SINGLE SOURCE OF TRUTH: src-tauri/migrations/*.sql. The Tauri SQLite plugin
+// reads each file via the migration registry in src-tauri/src/lib.rs; the
+// browser dev shim imports the same files at build time via Vite's ?raw
+// loader and concatenates them so the in-browser schema never drifts.
+//
+// IMPORTANT: when you add a new V<n>__*.sql migration:
+//   1. Register it in src-tauri/src/lib.rs alongside the others.
+//   2. Import it below and append to SCHEMA_SQL.
+//   3. Make the ALTER TABLE statements idempotent at the browser-shim layer:
+//      the browser shim stores rows as JSON so column adds are free, but a
+//      hard `CREATE TABLE` would clobber existing rows on every cold start.
+import SCHEMA_V1 from '../../../src-tauri/migrations/V1__init.sql?raw';
+import SCHEMA_V2 from '../../../src-tauri/migrations/V2__prices_prev_close.sql?raw';
+import SCHEMA_V3 from '../../../src-tauri/migrations/V3__instruments.sql?raw';
 
-export const SCHEMA_SQL = `
-CREATE TABLE IF NOT EXISTS accounts (
-  id            TEXT PRIMARY KEY,
-  name          TEXT NOT NULL,
-  brokerage     TEXT NOT NULL,
-  account_type  TEXT NOT NULL,
-  currency      TEXT NOT NULL DEFAULT 'USD',
-  created_at    TEXT NOT NULL
-);
+// The V2 migration is `ALTER TABLE prices ADD COLUMN prev_close REAL`. The
+// browser shim's driver.exec() doesn't understand ALTER TABLE (its tiny
+// regex parser only recognizes CREATE TABLE / CREATE INDEX / DELETE FROM),
+// so an ALTER hits the silent fall-through branch. That's the right behavior
+// for the shim: row storage is JSON, so the column is implicitly available
+// the moment any code writes a `prev_close` field. The statement is still
+// applied via splitSqlStatements() to keep the Tauri path consistent.
+//
+// The V3 migration adds the `instruments` table for per-symbol metadata
+// (sector, industry, long name) fetched from Yahoo's quoteSummary endpoint.
+// The browser shim's tableFromSql regex picks up the CREATE TABLE so the
+// table is implicitly registered on first read; row reads/writes go through
+// tableRead/tableWrite the same way every other table does.
+export const SCHEMA_SQL: string = `${SCHEMA_V1}\n\n${SCHEMA_V2}\n\n${SCHEMA_V3}`;
 
-CREATE TABLE IF NOT EXISTS transactions (
-  id            INTEGER PRIMARY KEY AUTOINCREMENT,
-  account_id    TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-  date          TEXT NOT NULL,
-  symbol        TEXT,
-  action        TEXT NOT NULL,
-  quantity      REAL NOT NULL DEFAULT 0,
-  price         REAL NOT NULL DEFAULT 0,
-  fees          REAL NOT NULL DEFAULT 0,
-  amount        REAL,
-  currency      TEXT NOT NULL DEFAULT 'USD',
-  notes         TEXT,
-  imported_from TEXT,
-  UNIQUE(account_id, date, symbol, action, quantity, price, imported_from)
-);
-CREATE INDEX IF NOT EXISTS idx_tx_account_date ON transactions(account_id, date);
-CREATE INDEX IF NOT EXISTS idx_tx_symbol_date  ON transactions(symbol, date);
+/**
+ * Split a multi-statement SQL string into individual statements. Robust
+ * against semicolons that live inside string literals (CREATE TABLE ... DEFAULT
+ * '...;...' won't silently truncate the schema). Strips full-line `--` comments
+ * before splitting so commentary doesn't confuse the parser.
+ */
+export function splitSqlStatements(sql: string): string[] {
+  // Drop `--` line comments. We do NOT support /* ... */ block comments here
+  // because the migration file doesn't use them; if that changes, extend.
+  const noComments = sql
+    .split('\n')
+    .map(line => {
+      const idx = line.indexOf('--');
+      return idx >= 0 ? line.slice(0, idx) : line;
+    })
+    .join('\n');
 
-CREATE TABLE IF NOT EXISTS prices (
-  symbol     TEXT NOT NULL,
-  date       TEXT NOT NULL,
-  close      REAL NOT NULL,
-  currency   TEXT NOT NULL DEFAULT 'USD',
-  fetched_at TEXT NOT NULL,
-  PRIMARY KEY (symbol, date)
-);
-
-CREATE TABLE IF NOT EXISTS symbol_metadata (
-  symbol           TEXT PRIMARY KEY,
-  name             TEXT,
-  asset_class      TEXT,
-  currency         TEXT,
-  last_split_date  TEXT
-);
-
-CREATE TABLE IF NOT EXISTS achievements (
-  id             INTEGER PRIMARY KEY AUTOINCREMENT,
-  milestone_key  TEXT NOT NULL UNIQUE,
-  unlocked_at    TEXT NOT NULL,
-  context_json   TEXT
-);
-
-CREATE TABLE IF NOT EXISTS scenarios (
-  id          INTEGER PRIMARY KEY AUTOINCREMENT,
-  name        TEXT NOT NULL,
-  inputs_json TEXT NOT NULL,
-  created_at  TEXT NOT NULL,
-  updated_at  TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS user_profile (
-  id                          INTEGER PRIMARY KEY CHECK (id = 1),
-  name                        TEXT,
-  birth_year                  INTEGER,
-  target_retirement_age       INTEGER,
-  expected_retirement_income  REAL,
-  household_size              INTEGER
-);
-
-CREATE TABLE IF NOT EXISTS tax_constants (
-  year   INTEGER NOT NULL,
-  key    TEXT NOT NULL,
-  value  TEXT NOT NULL,
-  notes  TEXT,
-  PRIMARY KEY (year, key)
-);
-
-CREATE TABLE IF NOT EXISTS settings (
-  key   TEXT PRIMARY KEY,
-  value TEXT NOT NULL
-);
-`;
+  const out: string[] = [];
+  let buf = '';
+  let inSingle = false;
+  let inDouble = false;
+  for (let i = 0; i < noComments.length; i++) {
+    const ch = noComments[i];
+    if (ch === "'" && !inDouble) {
+      // Handle SQL-style doubled-quote escape ('') by appending both and
+      // skipping the next index.
+      if (inSingle && noComments[i + 1] === "'") {
+        buf += "''";
+        i++;
+        continue;
+      }
+      inSingle = !inSingle;
+      buf += ch;
+      continue;
+    }
+    if (ch === '"' && !inSingle) {
+      if (inDouble && noComments[i + 1] === '"') {
+        buf += '""';
+        i++;
+        continue;
+      }
+      inDouble = !inDouble;
+      buf += ch;
+      continue;
+    }
+    if (ch === ';' && !inSingle && !inDouble) {
+      const stmt = buf.trim();
+      if (stmt) out.push(stmt);
+      buf = '';
+      continue;
+    }
+    buf += ch;
+  }
+  const tail = buf.trim();
+  if (tail) out.push(tail);
+  return out;
+}

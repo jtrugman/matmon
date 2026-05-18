@@ -6,12 +6,15 @@ import { importCsv } from '../src/lib/importers';
 import { insertAccount, insertTransactions, listTransactions } from '../src/lib/db/repos';
 import { buildPortfolio } from '../src/lib/portfolio';
 
-const FIDELITY = `Run Date,Action,Symbol,Description,Quantity,Price ($),Amount ($)
-05/02/2026,DIVIDEND RECEIVED,AAPL,APPLE INC,,,104.30
-04/29/2026,YOU BOUGHT,VOO,VANGUARD S&P 500 ETF,4,556.18,-2224.72
-03/15/2026,YOU BOUGHT,AAPL,APPLE INC,20,240.00,-4800.00
-02/10/2026,YOU BOUGHT,AAPL,APPLE INC,10,200.00,-2000.00
-01/05/2026,YOU SOLD,AAPL,APPLE INC,5,220.00,1100.00`;
+// Multi-account export shape (Account + Account Number columns). Matmon
+// rejects single-account Fidelity exports at the import gate, so every
+// Fidelity-shape test fixture must include the account columns.
+const FIDELITY = `Run Date,Account,Account Number,Action,Symbol,Description,Quantity,Price ($),Amount ($)
+05/02/2026,Individual,Z00001234,DIVIDEND RECEIVED,AAPL,APPLE INC,,,104.30
+04/29/2026,Individual,Z00001234,YOU BOUGHT,VOO,VANGUARD S&P 500 ETF,4,556.18,-2224.72
+03/15/2026,Individual,Z00001234,YOU BOUGHT,AAPL,APPLE INC,20,240.00,-4800.00
+02/10/2026,Individual,Z00001234,YOU BOUGHT,AAPL,APPLE INC,10,200.00,-2000.00
+01/05/2026,Individual,Z00001234,YOU SOLD,AAPL,APPLE INC,5,220.00,1100.00`;
 
 async function createAccount(id: string) {
   await insertAccount({
@@ -36,10 +39,14 @@ describe('Integration: CSV → DB → Portfolio', () => {
     const p = await buildPortfolio();
     const aapl = p.holdings.find(h => h.sym === 'AAPL' && h.account === 'fid-1')!;
     expect(aapl).toBeTruthy();
-    // 20@240 + 10@200 = 30 shares, cost = 6800, avg ~226.67
-    // sell 5 at avg ~226.67 → cost reduces by 1133.33 → qty 25, cost ~5666.67
-    expect(aapl.qty).toBe(25);
-    expect(aapl.cost).toBeCloseTo(6800 - (6800 / 30) * 5, 2);
+    // Chronological replay (the only correct order for running average cost):
+    //   01/05/2026 SELL  5 @ 220  → nothing held, zeroed out (qty 0, cost 0)
+    //   02/10/2026 BUY  10 @ 200  → qty 10, cost 2000
+    //   03/15/2026 BUY  20 @ 240  → qty 30, cost 6800
+    //   05/02/2026 DIVIDEND        → income only, no position change
+    // Final: qty 30, cost 6800.
+    expect(aapl.qty).toBe(30);
+    expect(aapl.cost).toBeCloseTo(6800, 2);
 
     const voo = p.holdings.find(h => h.sym === 'VOO' && h.account === 'fid-1');
     expect(voo).toBeTruthy();
