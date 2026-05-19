@@ -9,7 +9,7 @@
 // double-counting regressions automatically.
 
 import { describe, it, expect } from 'vitest';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { importCsv } from '../src/lib/importers';
 import { flowsFromTransactions, xirr } from '../src/lib/performance';
@@ -18,7 +18,14 @@ import { insertAccount, insertTransactions, listTransactions } from '../src/lib/
 import { slugifyAccountId } from '../src/lib/db/accountId';
 import { tallyDividends } from '../src/lib/milestones';
 
-describe('xirr-check · Fidelity multi-account sample, all-time', () => {
+const CSV_PATH = resolve(process.cwd(), 'example_csv/multiple_accounts_fidelity.csv');
+// example_csv/ is gitignored (real account data). Skip when missing (CI).
+const maybeDescribe = existsSync(CSV_PATH) ? describe : describe.skip;
+if (!existsSync(CSV_PATH)) {
+  console.info('[xirr-check.test] example_csv/multiple_accounts_fidelity.csv missing, skipping (CI safe).');
+}
+
+maybeDescribe('xirr-check · Fidelity multi-account sample, all-time', () => {
   it('produces a sane (positive, plausible) XIRR across both accounts', async () => {
     const csvPath = resolve(process.cwd(), 'example_csv/multiple_accounts_fidelity.csv');
     const csv = readFileSync(csvPath, 'utf8');
