@@ -68,6 +68,11 @@
     "@rollup/rollup-darwin-x64": "*",
     "@rollup/rollup-linux-x64-gnu": "*",
     "@rollup/rollup-linux-arm64-gnu": "*",
-    "@rollup/rollup-win32-x64-msvc": "*"
+    "@rollup/rollup-win32-x64-msvc": "*",
+    "@rolldown/binding-darwin-arm64": "*",
+    "@rolldown/binding-darwin-x64": "*",
+    "@rolldown/binding-linux-x64-gnu": "*",
+    "@rolldown/binding-linux-arm64-gnu": "*",
+    "@rolldown/binding-win32-x64-msvc": "*"
   }
 }
