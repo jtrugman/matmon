@@ -931,9 +931,26 @@ html.tauri .main {
   background: var(--loss-soft);
   color: var(--loss);
 }
-.activity-act.div {
+.activity-act.div,
+.activity-act.income {
   background: var(--accent-soft);
   color: var(--accent-ink);
+}
+/* Cash flows: deposits, withdrawals, transfers, contributions. Distinct
+   blue-violet tier so they read as "money moving" rather than "money
+   changing form". The hue is the same family as the accent (which is
+   the primary action color) but at a lower chroma so it never competes
+   with the active call-to-action elsewhere on the page. */
+.activity-act.cashflow {
+  background: oklch(0.94 0.024 240);
+  color: oklch(0.42 0.085 240);
+}
+/* Fees + any other unmapped action: neutral gray on paper-3 so they
+   recede behind the active flow visually. */
+.activity-act.fee,
+.activity-act.other {
+  background: var(--paper-3);
+  color: var(--ink-3);
 }
 .activity-amt {
   font-family: var(--font-mono);
