@@ -1,0 +1,5 @@
+Date,Action,Symbol,Description,Quantity,Price,Amount,Fees,Account,Brokerage,Account Type,Currency,Notes
+2024-01-15,buy,VOO,Vanguard S&P 500 ETF,5,440.50,2202.50,0.00,My Retirement 401k,Human Interest,trad_401k,USD,
+2024-02-10,contribution,,,,,500.00,,My Retirement 401k,Human Interest,trad_401k,USD,Bi-weekly contribution
+2024-03-15,dividend,VOO,Vanguard S&P 500 ETF,,,4.85,,My Retirement 401k,Human Interest,trad_401k,USD,Q1 dividend
+2024-04-01,transfer_in,VTI,Vanguard Total Stock,12,225.00,2700.00,,My Brokerage,Custom,taxable,USD,Initial transfer from old account
