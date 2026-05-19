@@ -4,7 +4,7 @@ import { BrokerageLogo } from '../components/BrokerageLogo';
 import { TickerLogo } from '../components/TickerLogo';
 import { HoldingChart } from '../components/charts/HoldingChart';
 import { EmptyState } from '../components/EmptyState';
-import { fmtMoney, fmtPct } from '../lib/format';
+import { fmtMoney, fmtPct, formatActionLabel, type ActionTier } from '../lib/format';
 import { listPriceHistory, loadAllTransactions } from '../lib/db/repos';
 import { backfillHistoricalPrices, filterBackfillSymbols } from '../lib/quotes/backfill';
 import { awaitBackfillRecovery, isBackfillRecoveryInFlight } from '../lib/usePortfolio';
@@ -13,7 +13,14 @@ import type { Holding, MatmonData, SeriesPoint } from '../data';
 type Tx = {
   id: string;
   date: Date;
-  action: 'buy' | 'sell' | 'div';
+  /** Raw action code from the DB (e.g. 'dividend', 'div_reinvest'). */
+  action: string;
+  /** Display label (e.g. "Dividend", "Reinvest"). */
+  actionLabel: string;
+  /** Visual tier for the badge color. */
+  tier: ActionTier;
+  /** Coarse bucket retained for the chart annotation hover ('buy' / 'sell' / 'div'). */
+  bucket: 'buy' | 'sell' | 'div';
   qty: number;
   price: number;
   amount: number | null;
@@ -250,16 +257,25 @@ export function HoldingDetailView({ data, holding, onBack }: Props) {
         const mapped: Tx[] = rows
           .filter(r => r.symbol)
           .map((r, idx) => {
-            const action: 'buy' | 'sell' | 'div' =
-              r.action === 'dividend' || r.action === 'div_reinvest' || r.action === 'interest'
+            const { label, tier } = formatActionLabel(r.action);
+            // Coarse bucket for chart annotations: every income-tier row
+            // (dividend, div_reinvest, interest) gets a 'div' bucket so it
+            // surfaces in the lifetime-dividend metric AND the chart dot.
+            // sell + transfer_out share a 'sell' bucket; everything else
+            // is a buy (covers buy, transfer_in, div_reinvest-as-shares).
+            const bucket: 'buy' | 'sell' | 'div' =
+              tier === 'income'
                 ? 'div'
-                : r.action === 'sell' || r.action === 'transfer_out'
+                : tier === 'sell' || r.action === 'transfer_out'
                   ? 'sell'
                   : 'buy';
             return {
               id: `${r.id}-${idx}`,
               date: new Date(r.date),
-              action,
+              action: r.action,
+              actionLabel: label,
+              tier,
+              bucket,
               qty: r.quantity,
               price: r.price,
               amount: r.amount,
@@ -280,10 +296,22 @@ export function HoldingDetailView({ data, holding, onBack }: Props) {
   }, [data.accounts, accountNameById]);
 
   const txsForHolding = useMemo(() => allTxs.filter(t => t.symbol === holding.sym), [allTxs, holding.sym]);
-  const buys = txsForHolding.filter(t => t.action === 'buy');
-  const sells = txsForHolding.filter(t => t.action === 'sell');
-  const divs = txsForHolding.filter(t => t.action === 'div');
-  const lifetimeDividends = divs.reduce((s, t) => s + Math.abs(t.amount || 0), 0);
+  // Use the coarse bucket for the chart annotation arrays so dots align with
+  // the legend ("Buy" = green triangle, "Sell" = red diamond, "Dividend" = blue
+  // dot). The bucket lumps every income-tier row into 'div' which matches
+  // what the chart legend already advertises.
+  const buys = txsForHolding.filter(t => t.bucket === 'buy');
+  const sells = txsForHolding.filter(t => t.bucket === 'sell');
+  const divs = txsForHolding.filter(t => t.bucket === 'div');
+  // Lifetime dividends counts dividend + div_reinvest only, matching the
+  // HomeView convention. Interest income is income but not a dividend, so
+  // it does NOT count toward this position-level "dividend" metric (it
+  // would lie about what the company / fund paid). Each row's amount is
+  // taken once: a div_reinvest row records the dividend that was paid AND
+  // immediately turned into shares, but it's still a single dividend event.
+  const lifetimeDividends = txsForHolding
+    .filter(t => t.action === 'dividend' || t.action === 'div_reinvest')
+    .reduce((s, t) => s + Math.abs(t.amount || 0), 0);
 
   const benchmarkSeries = useMemo(() => {
     // Without a real benchmark feed, leave this null. The old fabricated
@@ -607,9 +635,9 @@ export function HoldingDetailView({ data, holding, onBack }: Props) {
             <tbody>
               {txsForHolding.slice(0, 12).map(t => {
                 const amount =
-                  t.amount != null ? t.amount : t.action === 'sell' ? +(t.qty * t.price) : -(t.qty * t.price);
+                  t.amount != null ? t.amount : t.tier === 'sell' ? +(t.qty * t.price) : -(t.qty * t.price);
                 return (
-                  <tr key={t.id}>
+                  <tr key={t.id} data-testid={`hd-tx-row-${t.action}`}>
                     <td className="num">
                       {t.date.toLocaleDateString('en-US', {
                         month: 'short',
@@ -618,8 +646,8 @@ export function HoldingDetailView({ data, holding, onBack }: Props) {
                       })}
                     </td>
                     <td>
-                      <span className={`activity-act ${t.action}`}>
-                        {t.action === 'div' ? 'Div' : t.action === 'buy' ? 'Buy' : 'Sell'}
+                      <span className={`activity-act ${t.tier}`} data-testid={`hd-tx-action-${t.action}`}>
+                        {t.actionLabel}
                       </span>
                     </td>
                     <td className="r num">
