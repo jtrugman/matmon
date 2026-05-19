@@ -1,0 +1,126 @@
+# Release workflow for Matmon
+#
+# Triggers on any tag matching v* (for example v0.1.0). Builds the Tauri 2
+# desktop app across macOS (Apple Silicon and Intel), Linux (x64), and
+# Windows (x64), then publishes the bundles to a draft GitHub Release that
+# you can review and publish manually. Code-signing and notarization
+# secrets are stubbed and disabled until certificates are provisioned.
+
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-tauri:
+    name: Build ${{ matrix.label }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-latest
+            label: macOS (arm64)
+            rust-target: aarch64-apple-darwin
+            tauri-args: '--target aarch64-apple-darwin --bundles app'
+          - platform: macos-15-intel
+            label: macOS (x64 Intel)
+            rust-target: x86_64-apple-darwin
+            tauri-args: '--target x86_64-apple-darwin --bundles app'
+          - platform: ubuntu-22.04
+            label: Linux (x64)
+            rust-target: x86_64-unknown-linux-gnu
+            tauri-args: ''
+          - platform: windows-latest
+            label: Windows (x64)
+            rust-target: x86_64-pc-windows-msvc
+            tauri-args: ''
+
+    runs-on: ${{ matrix.platform }}
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 22 LTS
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: app/package-lock.json
+
+      - name: Install Rust stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust-target }}
+
+      - name: Cache Cargo registry and target directory
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: app/src-tauri -> target
+          key: ${{ matrix.platform }}-${{ matrix.rust-target }}
+
+      - name: Install Tauri 2 system dependencies (Linux only)
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libssl-dev
+
+      - name: Install frontend dependencies
+        working-directory: app
+        run: npm ci
+
+      - name: Build Tauri app and upload to draft release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Apple code-signing and notarization secrets.
+          # Add these as repo secrets when you have a Developer ID cert.
+          # APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          # APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          # APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          # APPLE_ID: ${{ secrets.APPLE_ID }}
+          # APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          # APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          # Windows code-signing secrets.
+          # Add these as repo secrets when you have an Authenticode cert.
+          # WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          # WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        with:
+          projectPath: app
+          tagName: ${{ github.ref_name }}
+          releaseName: 'Matmon v${{ github.ref_name }}'
+          releaseBody: 'Automated build of Matmon ${{ github.ref_name }}. See attached assets for your platform.'
+          releaseDraft: true
+          prerelease: false
+          args: ${{ matrix.tauri-args }}
+
+      # Tauri 2's bundle_dmg.sh fails on Apple Silicon, so we build only the
+      # .app above (--bundles app) and package the DMG here using Sindre
+      # Sorhus's npm `create-dmg`, which works reliably on both arm64 and
+      # x64 macOS runners.
+      - name: Bundle macOS DMG via create-dmg
+        if: matrix.platform == 'macos-latest' || matrix.platform == 'macos-15-intel'
+        working-directory: app
+        run: npm run bundle:dmg
+
+      - name: Upload macOS DMG to draft release
+        if: matrix.platform == 'macos-latest' || matrix.platform == 'macos-15-intel'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        working-directory: app
+        run: |
+          for dmg in src-tauri/target/release/bundle/dmg/*.dmg; do
+            echo "Uploading $dmg"
+            gh release upload "${{ github.ref_name }}" "$dmg" --clobber
+          done
