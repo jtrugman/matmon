@@ -19,12 +19,34 @@ import { getMarketStatus } from './marketHours';
  * Settings key for the one-shot recovery backfill. Users who onboarded BEFORE
  * the historical-backfill code shipped have an empty `prices` table; without
  * this recovery they'd see a permanently-empty chart until they manually hit
- * Settings → Market data → Refresh history. This flag flips to "yes" after
+ * Settings, Market data, Refresh history. This flag flips to "yes" after
  * the first successful recovery so subsequent launches don't re-trigger it.
  * Bumping to v2 is the canonical way to re-run the recovery if a future
  * shipping bug invalidates the original.
  */
 export const BACKFILL_RECOVERY_V1_KEY = 'backfill.recovery.v1.complete';
+
+/**
+ * Per-symbol "we last tried to backfill this and got nothing" sentinel set.
+ * Stored as a single comma-separated settings value so we don't need to
+ * touch the instruments table or the schema. The auto-heal reads this on
+ * boot: a symbol on the list is RETRIED on subsequent loads even when the
+ * overall recovery flag is set to "yes" (partial success leaves it on so
+ * we don't reset every symbol's coverage; the failed symbols deserve
+ * another chance because the failure was likely transient).
+ *
+ * The list is bounded by the user's holdings, so the worst case is ~50
+ * symbols, well below any settings-table size concern.
+ */
+export const BACKFILL_FAILED_SYMBOLS_KEY = 'backfill.failed.symbols.v1';
+
+/**
+ * Settings key for the most recent "all symbols failed" event. When this
+ * is set to a recent ISO timestamp the App renders a banner pointing the
+ * user at Settings, Market data, Refresh history. Cleared once any
+ * subsequent recovery lands at least one symbol's bars.
+ */
+export const BACKFILL_LAST_FAILURE_KEY = 'backfill.last.failure.ts';
 
 /**
  * Returns true while the global recovery backfill is in flight. HoldingDetailView
@@ -106,6 +128,23 @@ export function usePortfolio(): {
    * ... (3 of 13 symbols)".
    */
   recoveryProgress: RecoveryProgress | null;
+  /**
+   * User-facing message when the most recent recovery attempt failed to
+   * land ANY bars (e.g. Yahoo unreachable, every symbol returned EMPTY).
+   * Null when the recovery succeeded or hasn't run. App.tsx renders this
+   * as a sticky notice with a link to Settings, Market data, Refresh
+   * history. Cleared by `clearRecoveryError()` so the dismissal doesn't
+   * require a reload.
+   */
+  recoveryError: string | null;
+  /** Dismiss the recovery error banner without re-running the recovery. */
+  clearRecoveryError: () => void;
+  /**
+   * Reset the once-per-session recovery gate so the next reload() can fire
+   * a fresh attempt. Used by Settings, Backfill diagnostics, Force re-run
+   * after clearing the persisted flag.
+   */
+  resetRecoveryAttempt: () => void;
 } {
   const [data, setData] = useState<MatmonData>(EMPTY_MATMON_DATA);
   const [loading, setLoading] = useState(true);
@@ -114,6 +153,7 @@ export function usePortfolio(): {
   const [recoveryNotice, setRecoveryNotice] = useState<string | null>(null);
   const [recoveryInFlightState, setRecoveryInFlightState] = useState(false);
   const [recoveryProgress, setRecoveryProgress] = useState<RecoveryProgress | null>(null);
+  const [recoveryError, setRecoveryError] = useState<string | null>(null);
   // We only attempt recovery once per app session. Without this guard a
   // sequence of reload() calls (onboarding finish, dedupe migration, manual
   // refresh) could each kick off a recovery before the v1-complete flag has
@@ -137,31 +177,51 @@ export function usePortfolio(): {
   //   - the user has accounts AND holdings (so there's something to chart), AND
   //   - the prices table is empty for every held symbol (no history at all), AND
   //   - we haven't run recovery this session, AND
-  //   - the recovery-complete flag isn't already set.
+  //   - the recovery-complete flag isn't already set, OR a previously-failed
+  //     symbol from the persisted failed-list still has zero coverage.
   //
   // This rescues users who onboarded before the backfill orchestrator shipped:
   // their DB has accounts + transactions but no prices history, so the
   // portfolio chart and every HoldingDetailView chart would otherwise be empty
   // forever. We log every step under [matmon-diag] so the recovery is visible
   // when debugging.
+  //
+  // Per-symbol retry semantics (added for real-Yahoo hardening): when the
+  // recovery completes with mixed ok/failed, the failed symbol set is
+  // persisted to settings. Subsequent loads probe coverage per-symbol;
+  // any persisted-failed symbol that STILL has zero coverage gets retried
+  // (the new fetch enters the same backfill pipeline, just with a shorter
+  // work list). That way a 13-symbol portfolio where 3 hit a transient
+  // 429 self-heals on the next launch without forcing the user back to
+  // Settings.
   const maybeRunRecovery = useCallback(
     async (built: MatmonData): Promise<void> => {
       if (recoveryAttemptedRef.current) return;
       if (built.holdings.length === 0) return;
       try {
         const done = await getSetting(BACKFILL_RECOVERY_V1_KEY).catch(() => null);
+        const failedListRaw = await getSetting(BACKFILL_FAILED_SYMBOLS_KEY).catch(() => null);
+        const previouslyFailed = new Set<string>(
+          (failedListRaw || '')
+            .split(',')
+            .map(s => s.trim().toUpperCase())
+            .filter(Boolean),
+        );
         // Probe coverage for every held symbol. If ANY symbol already has
-        // stored price history, this isn't a virgin DB so recovery isn't
-        // needed (the per-symbol auto-backfill on chart open handles the
-        // long tail of incremental gaps).
+        // stored price history, this isn't a virgin DB so the global recovery
+        // isn't needed. But if a previously-failed symbol still has zero
+        // coverage, we treat that symbol alone as the recovery target so
+        // the retry actually fetches it.
         const heldSymbols = filterBackfillSymbols(built.holdings.map(h => h.sym));
         if (heldSymbols.length === 0) return;
         let anyCoverage = false;
+        const missingCoverageSymbols: string[] = [];
         for (const sym of heldSymbols) {
           const cov = await getPriceCoverage(sym).catch(() => null);
           if (cov && cov.count > 0) {
             anyCoverage = true;
-            break;
+          } else {
+            missingCoverageSymbols.push(sym);
           }
         }
         // Auto-heal: if the flag is set but the prices table has NO coverage
@@ -171,15 +231,31 @@ export function usePortfolio(): {
         // complete" and run the recovery. Without this, Justin's actual
         // portfolio.db (which has flag=yes and zero price rows) would never
         // self-recover.
+        // Also auto-heal: if the flag is set but at least one symbol from
+        // the persisted failed list still has no coverage, retry just
+        // those.
+        let retryOnlyFailed = false;
         if (done === 'yes' && anyCoverage) {
-          recoveryAttemptedRef.current = true;
-          return;
+          // Check whether any previously-failed symbols still have no
+          // coverage; if so, fall through to a partial retry path.
+          const stillFailedAndUncovered = missingCoverageSymbols.filter(s =>
+            previouslyFailed.has(s),
+          );
+          if (stillFailedAndUncovered.length === 0) {
+            recoveryAttemptedRef.current = true;
+            return;
+          }
+          retryOnlyFailed = true;
+          diag('portfolio', 'backfill-recovery retrying failed symbols', {
+            count: stillFailedAndUncovered.length,
+            symbols: stillFailedAndUncovered.slice(0, 5),
+          });
         }
         if (done === 'yes' && !anyCoverage) {
           diag('portfolio', 'backfill-recovery flag set but no coverage; re-running');
           // Fall through to the recovery path below.
         }
-        if (anyCoverage) {
+        if (anyCoverage && !retryOnlyFailed) {
           // Set the flag so we don't re-check on every reload(). The user
           // already has SOME history, so the per-chart auto-backfill (in
           // HoldingDetailView) handles any remaining gaps incrementally.
@@ -204,22 +280,32 @@ export function usePortfolio(): {
           recoveryAttemptedRef.current = true;
           return;
         }
+        // Narrow the work list when we're only retrying previously-failed
+        // symbols. Otherwise the full held-symbol set is the work list.
+        const targetSymbols = retryOnlyFailed
+          ? missingCoverageSymbols.filter(s => previouslyFailed.has(s))
+          : heldSymbols;
         recoveryAttemptedRef.current = true;
         recoveryInFlight = true;
         setRecoveryInFlightState(true);
         diag('portfolio', 'backfill-recovery starting', {
-          symbols: heldSymbols.length,
+          symbols: targetSymbols.length,
           earliest: earliest.toISOString().slice(0, 10),
+          retryOnlyFailed,
         });
         // Seed both progress + notice up front so HomeView can flip from
         // empty-state to loading-state on the same render that buildPortfolio
         // resolved on. Without the synchronous seed, there's a single render
         // where chartSeries is short and recoveryInFlightState is still false,
         // which would flash the manual CTA before the indicator appears.
-        setRecoveryProgress({ done: 0, total: heldSymbols.length });
+        setRecoveryProgress({ done: 0, total: targetSymbols.length });
         setRecoveryNotice(
-          `Loading chart history... (0 of ${heldSymbols.length} symbols)`,
+          `Loading chart history... (0 of ${targetSymbols.length} symbols)`,
         );
+        // Clear any prior failure banner the moment we start a new
+        // attempt; the only way to flip it back on is the all-failed
+        // branch below.
+        setRecoveryError(null);
         // Fire-and-forget so the initial render isn't blocked. The recovery
         // runs in the background; we rebuild the portfolio progressively as
         // each symbol's bars land so the chart visibly fills in instead of
@@ -267,7 +353,7 @@ export function usePortfolio(): {
               }
             };
             const result = await backfillHistoricalPrices(
-              heldSymbols,
+              targetSymbols,
               earliest,
               onProgress,
             );
@@ -288,9 +374,31 @@ export function usePortfolio(): {
             // buildHistoricalSeries takes the real-mark code path.
             if (result.ok.length > 0) {
               await setSetting(BACKFILL_RECOVERY_V1_KEY, 'yes').catch(() => {});
+              // Clear the prior all-failed timestamp; the recovery
+              // landed bars so we no longer want the failure banner.
+              await setSetting(BACKFILL_LAST_FAILURE_KEY, '').catch(() => {});
             } else {
               diag('portfolio', 'backfill-recovery landed no bars, leaving flag off');
+              // All symbols failed. Persist the failure timestamp so the
+              // banner survives a reload until the next attempt succeeds,
+              // and surface a clear message immediately so the user sees
+              // why the chart is empty.
+              await setSetting(
+                BACKFILL_LAST_FAILURE_KEY,
+                new Date().toISOString(),
+              ).catch(() => {});
+              setRecoveryError(
+                "Couldn't reach Yahoo Finance. Retry from Settings, Market data, Refresh history, or check your network.",
+              );
             }
+            // Persist the failed-symbol list so subsequent loads retry
+            // ONLY those, without re-fetching the symbols that succeeded
+            // this time. When result.failed is empty we clear the list
+            // entirely; partial recovery shrinks it.
+            const persistedFailed = result.failed.join(',');
+            await setSetting(BACKFILL_FAILED_SYMBOLS_KEY, persistedFailed).catch(
+              () => {},
+            );
             // Kick off sector backfill in parallel with the portfolio
             // rebuild. We DON'T await: the rebuild gives the user a populated
             // chart immediately, and the sector data follows whenever it
@@ -488,6 +596,19 @@ export function usePortfolio(): {
     reload();
   }, [reload]);
 
+  const clearRecoveryError = useCallback(() => setRecoveryError(null), []);
+
+  /**
+   * Reset the per-session "we already attempted recovery" gate so the next
+   * reload() can fire a fresh attempt. The Force re-run button in Settings
+   * uses this AFTER it clears the persisted flag + failed list so the
+   * follow-up reload picks up the cleared state and runs the recovery
+   * again, instead of being blocked by the once-per-session ref.
+   */
+  const resetRecoveryAttempt = useCallback(() => {
+    recoveryAttemptedRef.current = false;
+  }, []);
+
   return {
     data,
     loading,
@@ -499,5 +620,8 @@ export function usePortfolio(): {
     recoveryNotice,
     recoveryInFlight: recoveryInFlightState,
     recoveryProgress,
+    recoveryError,
+    clearRecoveryError,
+    resetRecoveryAttempt,
   };
 }

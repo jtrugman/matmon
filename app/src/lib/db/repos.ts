@@ -653,6 +653,78 @@ export async function getPriceCoverage(
 }
 
 /**
+ * Per-symbol coverage rollup across the entire prices table in one round
+ * trip. Used by the Settings > Privacy diagnostics panel so we don't issue
+ * one getPriceCoverage() call per symbol for a 50-symbol portfolio.
+ *
+ * Returns an array of { symbol, earliest, latest, count, fetched_at }
+ * sorted by symbol ascending. `fetched_at` is the MAX over all rows for
+ * that symbol so the diagnostic can show "last attempt" as the freshest
+ * fetch timestamp the prices table knows about for the symbol.
+ */
+export async function listAllPriceCoverage(): Promise<
+  Array<{ symbol: string; earliest: Date; latest: Date; count: number; lastFetched: Date | null }>
+> {
+  await init();
+  const drv = await getDriver();
+  if (isBrowserShim(drv)) {
+    const rows = (drv as any).tableRead('prices') as PriceRow[];
+    const bySym = new Map<
+      string,
+      { earliest: string; latest: string; count: number; lastFetched: string }
+    >();
+    for (const r of rows) {
+      const cur = bySym.get(r.symbol);
+      if (!cur) {
+        bySym.set(r.symbol, {
+          earliest: r.date,
+          latest: r.date,
+          count: 1,
+          lastFetched: r.fetched_at || '',
+        });
+        continue;
+      }
+      if (r.date < cur.earliest) cur.earliest = r.date;
+      if (r.date > cur.latest) cur.latest = r.date;
+      cur.count++;
+      if (r.fetched_at && r.fetched_at > cur.lastFetched) cur.lastFetched = r.fetched_at;
+    }
+    return Array.from(bySym.entries())
+      .sort((a, b) => a[0].localeCompare(b[0]))
+      .map(([symbol, v]) => ({
+        symbol,
+        earliest: new Date(v.earliest),
+        latest: new Date(v.latest),
+        count: v.count,
+        lastFetched: v.lastFetched ? new Date(v.lastFetched) : null,
+      }));
+  }
+  const rows = await drv.select<{
+    symbol: string;
+    earliest: string;
+    latest: string;
+    n: number;
+    last_fetched: string;
+  }>(
+    `SELECT symbol,
+            MIN(date) AS earliest,
+            MAX(date) AS latest,
+            COUNT(*) AS n,
+            MAX(fetched_at) AS last_fetched
+       FROM prices
+      GROUP BY symbol
+      ORDER BY symbol ASC`,
+  );
+  return rows.map(r => ({
+    symbol: r.symbol,
+    earliest: new Date(r.earliest),
+    latest: new Date(r.latest),
+    count: r.n,
+    lastFetched: r.last_fetched ? new Date(r.last_fetched) : null,
+  }));
+}
+
+/**
  * Latest stored price for a symbol (highest date wins). Returns null when no
  * price row exists yet. Used by the portfolio aggregator as a fallback between
  * the live-quote cache and the last-tx-price fallback.

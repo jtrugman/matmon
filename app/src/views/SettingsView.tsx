@@ -6,9 +6,15 @@ import {
   getPriceCoverage,
   getSetting,
   listAccounts,
+  listAllPriceCoverage,
   listTransactions,
   setSetting,
 } from '../lib/db/repos';
+import {
+  BACKFILL_FAILED_SYMBOLS_KEY,
+  BACKFILL_LAST_FAILURE_KEY,
+  BACKFILL_RECOVERY_V1_KEY,
+} from '../lib/usePortfolio';
 import { networkLog } from '../lib/quotes/log';
 import { setOffline } from '../lib/quotes';
 import { backfillHistoricalPrices, filterBackfillSymbols } from '../lib/quotes/backfill';
@@ -108,6 +114,14 @@ type Props = {
    *  renders can omit it. */
   onReloadPortfolio?: () => void | Promise<void>;
   /**
+   * Optional: when the user clicks "Force re-run all" we first reset the
+   * usePortfolio once-per-session gate so the follow-up reload re-fires
+   * the recovery probe. App.tsx wires this; isolated renders may omit it
+   * (the persisted flag clear alone is enough for the eventual next
+   * launch to retry).
+   */
+  onResetRecoveryAttempt?: () => void;
+  /**
    * Notify the parent that the auto-refresh setting changed so it can
    * rebuild the runtime with the new (enabled, intervalMin) pair. The
    * parent reads the persisted values back from getSetting on app boot;
@@ -150,6 +164,7 @@ export function SettingsView({
   setTweak,
   onRestartOnboarding,
   onReloadPortfolio,
+  onResetRecoveryAttempt,
   onAutoRefreshChange,
 }: Props) {
   const [offlineOn, setOfflineOn] = useState(false);
@@ -226,6 +241,130 @@ export function SettingsView({
   // networkLog.list() already returns newest-first (push uses unshift), so just
   // cap to the last N entries for display.
   const recentLog = liveLog.slice(0, NET_LOG_MAX_ROWS);
+
+  // Backfill diagnostics state. Refreshed every time the network log
+  // changes (so a fresh fetch immediately shows up) AND whenever the
+  // "Force re-run all" button kicks off a new attempt. Visibility into
+  // recovery state is the whole point of this panel: a 13-symbol portfolio
+  // with 3 transient failures should be SELF-EVIDENT here.
+  type CoverageRow = {
+    symbol: string;
+    earliest: Date;
+    latest: Date;
+    count: number;
+    lastFetched: Date | null;
+  };
+  type Diagnostics = {
+    coverage: CoverageRow[];
+    recoveryFlag: string | null;
+    failedSymbols: string[];
+    lastFailureTs: string | null;
+    heldSymbols: string[];
+  };
+  const [diagnostics, setDiagnostics] = useState<Diagnostics | null>(null);
+  const [diagBusy, setDiagBusy] = useState(false);
+  const reloadDiagnostics = useCallback(async (): Promise<void> => {
+    try {
+      const [coverage, recoveryFlag, failedRaw, lastFailureTs, txs] = await Promise.all([
+        listAllPriceCoverage(),
+        getSetting(BACKFILL_RECOVERY_V1_KEY),
+        getSetting(BACKFILL_FAILED_SYMBOLS_KEY),
+        getSetting(BACKFILL_LAST_FAILURE_KEY),
+        listTransactions(),
+      ]);
+      const heldSymbols = filterBackfillSymbols(txs.map(t => t.symbol));
+      setDiagnostics({
+        coverage,
+        recoveryFlag,
+        failedSymbols: (failedRaw || '')
+          .split(',')
+          .map(s => s.trim().toUpperCase())
+          .filter(Boolean),
+        lastFailureTs: lastFailureTs || null,
+        heldSymbols,
+      });
+    } catch {
+      // Diagnostic read failures are non-fatal: the panel renders an
+      // empty state with no rows, the user can still recover from the
+      // main Refresh history button.
+      setDiagnostics({
+        coverage: [],
+        recoveryFlag: null,
+        failedSymbols: [],
+        lastFailureTs: null,
+        heldSymbols: [],
+      });
+    }
+  }, []);
+  useEffect(() => {
+    reloadDiagnostics();
+  }, [reloadDiagnostics]);
+  // Refresh after every network log change so a freshly-completed fetch
+  // is reflected immediately (one source of truth, no manual click).
+  useEffect(() => {
+    const unsub = networkLog.subscribe(() => {
+      // Debounce: a backfill cascade can fire 13 entries in ~3s; we don't
+      // want to re-query the whole prices table 13 times. Coalesce to one
+      // refresh per tick.
+      void Promise.resolve().then(() => {
+        reloadDiagnostics();
+      });
+    });
+    return () => {
+      unsub();
+    };
+  }, [reloadDiagnostics]);
+
+  async function handleForceRerunAll(): Promise<void> {
+    if (diagBusy) return;
+    setDiagBusy(true);
+    try {
+      // Step 1: clear the persisted recovery state so a future cold
+      // launch retries from scratch. This is the "rewind to virgin"
+      // path even if we never re-fetch this session.
+      await setSetting(BACKFILL_RECOVERY_V1_KEY, '');
+      await setSetting(BACKFILL_FAILED_SYMBOLS_KEY, '');
+      await setSetting(BACKFILL_LAST_FAILURE_KEY, '');
+      // Step 2: reset the once-per-session gate so maybeRunRecovery
+      // will fire on the next reload even though we're in the same
+      // browser session.
+      onResetRecoveryAttempt?.();
+      // Step 3: trigger a forced backfill of all held symbols, mirroring
+      // the existing "Refresh history" button. This way the user gets
+      // an immediate re-fetch instead of having to fully reload the
+      // page. The forced backfill bypasses the "already covered, skip"
+      // optimization so every symbol does hit Yahoo. Once it lands,
+      // the chart picks up the fresh bars.
+      const txs = await listTransactions();
+      const symbols = filterBackfillSymbols(txs.map(t => t.symbol));
+      if (symbols.length > 0) {
+        let earliest = new Date();
+        for (const t of txs) {
+          const d = new Date(t.date);
+          if (d < earliest) earliest = d;
+        }
+        const { ok, failed } = await backfillHistoricalPrices(
+          symbols,
+          earliest,
+          undefined,
+          { force: true },
+        );
+        // Persist flag + failed list in the same way the auto-heal
+        // recovery does, so subsequent loads see a consistent state
+        // regardless of which path actually fetched the bars.
+        if (ok.length > 0) {
+          await setSetting(BACKFILL_RECOVERY_V1_KEY, 'yes');
+        }
+        await setSetting(BACKFILL_FAILED_SYMBOLS_KEY, failed.join(','));
+      }
+      // Step 4: kick a portfolio reload so the chart picks up the new
+      // bars and the diagnostic table reflects the fresh state.
+      await Promise.resolve(onReloadPortfolio?.());
+      await reloadDiagnostics();
+    } finally {
+      setDiagBusy(false);
+    }
+  }
 
   // Real DB stats (account / transaction count). The "2.4 MB · 1,847
   // transactions" footer previously hardcoded both numbers regardless of what
@@ -527,6 +666,19 @@ export function SettingsView({
                         <span className="num muted" style={{ fontSize: 11 }}>
                           {r.durationMs} ms
                         </span>
+                        {r.note && (
+                          <span
+                            className="num muted"
+                            style={{
+                              fontSize: 11,
+                              fontFamily: 'var(--font-mono)',
+                              color: r.ok ? 'var(--ink-3)' : 'var(--loss)',
+                            }}
+                            data-testid="net-log-note"
+                          >
+                            {r.note}
+                          </span>
+                        )}
                         <span
                           className="num"
                           style={{
@@ -545,6 +697,178 @@ export function SettingsView({
                       </div>
                     ))
                   )}
+                </div>
+              </div>
+            </div>
+
+            <div
+              className="settings-row"
+              style={{ alignItems: 'flex-start' }}
+              data-testid="backfill-diagnostics"
+            >
+              <div className="settings-label">
+                <div className="lab">Backfill diagnostics</div>
+                <div className="hint">
+                  Per-symbol coverage for the chart history backfill. Use Force re-run if a
+                  symbol shows zero bars and the daily Refresh history button didn't fix it.
+                </div>
+              </div>
+              <div className="settings-control" style={{ width: '100%' }}>
+                <div
+                  style={{
+                    fontSize: 11,
+                    fontFamily: 'var(--font-mono)',
+                    color: 'var(--ink-3)',
+                    marginBottom: 8,
+                    display: 'flex',
+                    gap: 16,
+                    flexWrap: 'wrap',
+                  }}
+                  data-testid="backfill-diagnostics-summary"
+                >
+                  <span>
+                    Recovery flag:{' '}
+                    <strong style={{ color: 'var(--ink-2)' }}>
+                      {diagnostics?.recoveryFlag === 'yes' ? 'complete' : 'pending'}
+                    </strong>
+                  </span>
+                  <span>
+                    Held symbols:{' '}
+                    <strong style={{ color: 'var(--ink-2)' }}>
+                      {diagnostics?.heldSymbols.length ?? 0}
+                    </strong>
+                  </span>
+                  <span>
+                    With coverage:{' '}
+                    <strong style={{ color: 'var(--ink-2)' }}>
+                      {diagnostics?.coverage.length ?? 0}
+                    </strong>
+                  </span>
+                  <span>
+                    Failed last run:{' '}
+                    <strong
+                      style={{
+                        color:
+                          (diagnostics?.failedSymbols.length ?? 0) > 0
+                            ? 'var(--loss)'
+                            : 'var(--ink-2)',
+                      }}
+                    >
+                      {diagnostics?.failedSymbols.length ?? 0}
+                    </strong>
+                  </span>
+                  {diagnostics?.lastFailureTs && (
+                    <span style={{ color: 'var(--loss)' }}>
+                      All failed at{' '}
+                      {(() => {
+                        try {
+                          return new Date(diagnostics.lastFailureTs).toLocaleString();
+                        } catch {
+                          return diagnostics.lastFailureTs;
+                        }
+                      })()}
+                    </span>
+                  )}
+                </div>
+                <div
+                  className="net-log"
+                  data-testid="backfill-coverage-table"
+                  style={{ maxHeight: 260, overflowY: 'auto' }}
+                >
+                  {(() => {
+                    const heldSymbols = diagnostics?.heldSymbols ?? [];
+                    const coverageMap = new Map<string, CoverageRow>();
+                    for (const row of diagnostics?.coverage ?? []) {
+                      coverageMap.set(row.symbol, row);
+                    }
+                    const failedSet = new Set(diagnostics?.failedSymbols ?? []);
+                    // Render every held symbol so missing rows are visible
+                    // as zero-bar entries. Order: held alphabetical first,
+                    // then any extra coverage rows for symbols no longer
+                    // held (orphans from divested positions).
+                    const heldRows = heldSymbols.slice().sort();
+                    const orphanRows = (diagnostics?.coverage ?? [])
+                      .map(r => r.symbol)
+                      .filter(s => !heldSymbols.includes(s))
+                      .sort();
+                    const allRows = [...heldRows, ...orphanRows];
+                    if (allRows.length === 0) {
+                      return (
+                        <div className="net-log-row">
+                          <span className="muted" style={{ fontSize: 12 }}>
+                            No symbols yet. Import a brokerage CSV to populate.
+                          </span>
+                        </div>
+                      );
+                    }
+                    return allRows.map(sym => {
+                      const cov = coverageMap.get(sym);
+                      const isFailed = failedSet.has(sym);
+                      const noCoverage = !cov || cov.count === 0;
+                      const status = noCoverage ? (isFailed ? 'failed' : 'pending') : 'ok';
+                      const statusColor =
+                        status === 'ok'
+                          ? 'var(--gain)'
+                          : status === 'failed'
+                            ? 'var(--loss)'
+                            : 'var(--ink-4)';
+                      return (
+                        <div
+                          className="net-log-row"
+                          key={sym}
+                          data-testid={`backfill-coverage-row-${sym}`}
+                        >
+                          <span style={{ fontWeight: 600, minWidth: 80 }}>{sym}</span>
+                          <span className="muted" style={{ fontSize: 11 }}>
+                            {cov && cov.count > 0
+                              ? `${cov.earliest.toISOString().slice(0, 10)} to ${cov.latest
+                                  .toISOString()
+                                  .slice(0, 10)}`
+                              : '-'}
+                          </span>
+                          <span
+                            className="num muted"
+                            style={{ fontSize: 11, fontFamily: 'var(--font-mono)' }}
+                          >
+                            {cov && cov.count > 0
+                              ? `${cov.count.toLocaleString('en-US')} bars`
+                              : '0 bars'}
+                          </span>
+                          <span
+                            className="num muted"
+                            style={{ fontSize: 11, fontFamily: 'var(--font-mono)' }}
+                          >
+                            {cov?.lastFetched ? formatLogTime(cov.lastFetched) : '-'}
+                          </span>
+                          <span
+                            className="num"
+                            style={{
+                              fontSize: 10,
+                              fontFamily: 'var(--font-mono)',
+                              textTransform: 'uppercase',
+                              letterSpacing: '0.06em',
+                              color: statusColor,
+                              border: '1px solid var(--line)',
+                              borderRadius: 4,
+                              padding: '1px 5px',
+                            }}
+                          >
+                            {status}
+                          </span>
+                        </div>
+                      );
+                    });
+                  })()}
+                </div>
+                <div className="settings-actions" style={{ marginTop: 8 }}>
+                  <button
+                    className="btn"
+                    onClick={handleForceRerunAll}
+                    disabled={diagBusy}
+                    data-testid="backfill-force-rerun"
+                  >
+                    {diagBusy ? 'Re-running...' : 'Force re-run all'}
+                  </button>
                 </div>
               </div>
             </div>

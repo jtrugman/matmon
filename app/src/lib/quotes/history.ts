@@ -8,12 +8,68 @@
 // token, which is critical: the /v7/quote endpoint they used to use now
 // requires a crumb (consent cookie flow) and is unusable from a desktop app.
 //
+// ── Real Yahoo response shapes this module handles ─────────────────────────
+//
+// Captured live in `tests/__fixtures__/yahoo/` against real symbols on
+// 2026-05-18. Document the wire-level quirks so future contributors can see
+// the contract this parser actually enforces rather than the contract a
+// reasonable person might assume.
+//
+//   1. Success (AMD, SPY, VITAX, RKLB):
+//      {
+//        chart: {
+//          result: [{
+//            meta: { symbol, currency, chartPreviousClose?, regularMarketPrice, ... },
+//            timestamp: [unix_seconds, ...],
+//            indicators: { quote: [{ close: [...], open?, high?, low?, volume? }] }
+//          }],
+//          error: null
+//        }
+//      }
+//
+//   2. Mutual fund (VITAX): same shape, but meta may omit
+//      regularMarketDayHigh/Low and regularMarketVolume. The parser doesn't
+//      touch those fields, so this is transparent.
+//
+//   3. Recently-listed (RKLB, IPO 2020): the `timestamp[]` array starts at
+//      the listing date even when period1 predates it. The parser treats
+//      every timestamp Yahoo returns as authoritative; we never invent
+//      bars for the pre-listing window.
+//
+//   4. Halted / penny-stock null closes (HCMC sample had 2 null closes
+//      across ~1850 timestamps): the parser SKIPS those bars rather than
+//      coercing them to zero. Downstream forward-fill in portfolio.ts
+//      handles non-trading-day gaps.
+//
+//   5. Not Found / Delisted / Bad Request:
+//      {
+//        chart: {
+//          result: null,
+//          error: { code: "Not Found", description: "No data found, symbol may be delisted" }
+//        }
+//      }
+//      The parser returns an empty bars array and stamps the network log
+//      entry with the error description so Settings > Privacy shows
+//      "FAIL Not Found" rather than a silent miss.
+//
+//   6. HTTP 429 (rate limited) and 5xx (Yahoo down): handled in the
+//      transport layer (yahoo.ts) with 1 retry plus a 1s backoff. If the
+//      retry also returns 429/5xx, the parser logs the final status and
+//      returns []. This means a single rate-limit blip retries once;
+//      sustained 429s give up rather than burning the entire fetch budget
+//      against a wall.
+//
+//   7. Non-JSON 2xx (Yahoo block page, HTML): defensive try/catch around
+//      JSON.parse returns [] rather than throwing. The network log entry
+//      records ok: false with the byte count so the user sees something
+//      came back, just not parseable.
+//
 // Network policy:
 //   - Per-request concurrency is gated by the SAME semaphore as live quotes
 //     in yahoo.ts (the cap = 4 lives there). We import that semaphore via the
 //     yahoo module so the caps are unified across the app and we never drown
 //     Yahoo with 17 parallel history requests.
-//   - Each call is logged to the same networkLog ring buffer Settings →
+//   - Each call is logged to the same networkLog ring buffer Settings >
 //     Privacy reads from. The user sees the backfill there in real time.
 //   - One retry on transient failure (network reject, abort) with 500ms
 //     backoff. After the second failure we log it and return [] so a single
@@ -56,10 +112,14 @@ function toUtcDateString(d: Date): string {
  * skipped here: they're not data, and downstream forward-fill in portfolio.ts
  * handles non-trading days fine.
  *
- * Returns an empty array on failure (network error, 429/5xx, non-JSON). One
- * missing symbol's history shouldn't block the rest of the backfill, so we
- * never throw out of this function on a transport error. Errors that ARE
- * surfaced as throws are programmer bugs (bad input).
+ * Returns an empty array on failure (network error, 429/5xx, non-JSON, Yahoo
+ * `chart.error` object). One missing symbol's history shouldn't block the
+ * rest of the backfill, so we never throw out of this function on a transport
+ * error. Errors that ARE surfaced as throws are programmer bugs (bad input).
+ *
+ * Every call appends ONE entry to the networkLog ring buffer with a structured
+ * note ("OK N bars", "EMPTY", "FAIL <reason>") so Settings > Privacy renders
+ * the outcome of each symbol fetch without needing devtools.
  *
  * Retry policy: the underlying getWithTimeoutAndRetry already does 2
  * attempts with a 1s backoff on transient failures (429, 5xx, network
@@ -98,6 +158,12 @@ export async function fetchHistoricalDaily(
     durationMs: 0,
     ok: false,
   };
+  // Captures the structured note shown to the user. Mutated in place so the
+  // single `networkLog.push(entry)` at the end of the function always emits
+  // one log row per fetch attempt.
+  const setNote = (note: string) => {
+    entry.note = note;
+  };
   try {
     let result: { text: string; status: number };
     try {
@@ -114,6 +180,8 @@ export async function fetchHistoricalDaily(
       const dur = typeof performance !== 'undefined' ? performance.now() - t0 : 0;
       entry.durationMs = Math.round(dur);
       entry.ok = false;
+      const reason = describeTransportError(e);
+      setNote(`FAIL ${reason}`);
       networkLog.push(entry);
       console.info(`[matmon] history fetch failed for ${symbol}`, e);
       return [];
@@ -122,8 +190,28 @@ export async function fetchHistoricalDaily(
     entry.bytes = result.text.length;
     const dur = typeof performance !== 'undefined' ? performance.now() - t0 : 0;
     entry.durationMs = Math.round(dur);
-    if (result.status === 429 || (result.status >= 500 && result.status <= 599)) {
+    if (result.status === 429) {
+      // Rate limited. The transport layer already retried once with a 1s
+      // backoff; getting 429 here means Yahoo is genuinely throttling us.
+      // We surface this distinctly so the diagnostic panel can hint at it.
       entry.ok = false;
+      setNote('FAIL HTTP 429 rate limited');
+      networkLog.push(entry);
+      return [];
+    }
+    if (result.status >= 500 && result.status <= 599) {
+      entry.ok = false;
+      setNote(`FAIL HTTP ${result.status}`);
+      networkLog.push(entry);
+      return [];
+    }
+    if (result.status !== 200) {
+      // 4xx other than 429: Yahoo's "Bad Request" wrapper for delisted
+      // symbols actually returns HTTP 200 with a chart.error body, so a
+      // non-200 here is something unusual (404 for a malformed URL, 403
+      // for a geo block). Log it; bail.
+      entry.ok = false;
+      setNote(`FAIL HTTP ${result.status}`);
       networkLog.push(entry);
       return [];
     }
@@ -131,23 +219,45 @@ export async function fetchHistoricalDaily(
     try {
       payload = JSON.parse(result.text);
     } catch {
+      // Non-JSON from a 2xx response is a real upstream surprise (block
+      // page, HTML interstitial). Don't throw out of the function: a single
+      // weird response shouldn't cancel the rest of the batch.
       entry.ok = false;
+      setNote('FAIL non-JSON response');
+      networkLog.push(entry);
+      return [];
+    }
+    // Yahoo's documented error envelope: `chart.error` carries a code and
+    // human-readable description. Captured live for NONEXISTENTXYZ123 and
+    // a bad period window (see tests/__fixtures__/yahoo/not-found.json).
+    // The HTTP status for these is 200 (not 4xx), so we MUST check the
+    // body rather than the status code.
+    const chartError = payload?.chart?.error;
+    if (chartError && typeof chartError === 'object') {
+      entry.ok = false;
+      const code = chartError.code || 'Error';
+      setNote(`FAIL ${code}`);
       networkLog.push(entry);
       return [];
     }
     const r = payload?.chart?.result?.[0];
     if (!r) {
+      // Empty `result` array (or array of nulls) with no error: treat as a
+      // genuine empty response. Some Yahoo paths emit this for stale
+      // exchanges and weekend windows. Logged as success with 0 bars so
+      // the diagnostic panel says "EMPTY" rather than "FAIL".
       entry.ok = true;
+      setNote('EMPTY');
       networkLog.push(entry);
       return [];
     }
-    const timestamps: number[] = r.timestamp || [];
+    const timestamps: number[] = Array.isArray(r.timestamp) ? r.timestamp : [];
     const quote = r.indicators?.quote?.[0] || {};
-    const closes: Array<number | null> = quote.close || [];
-    const opens: Array<number | null> = quote.open || [];
-    const highs: Array<number | null> = quote.high || [];
-    const lows: Array<number | null> = quote.low || [];
-    const volumes: Array<number | null> = quote.volume || [];
+    const closes: Array<number | null> = Array.isArray(quote.close) ? quote.close : [];
+    const opens: Array<number | null> = Array.isArray(quote.open) ? quote.open : [];
+    const highs: Array<number | null> = Array.isArray(quote.high) ? quote.high : [];
+    const lows: Array<number | null> = Array.isArray(quote.low) ? quote.low : [];
+    const volumes: Array<number | null> = Array.isArray(quote.volume) ? quote.volume : [];
 
     const bars: HistoricalBar[] = [];
     for (let i = 0; i < timestamps.length; i++) {
@@ -155,9 +265,11 @@ export async function fetchHistoricalDaily(
       // Yahoo emits nulls for holidays and halted symbols. Skip them; the
       // portfolio layer forward-fills non-trading days from the prior close.
       if (close == null || !Number.isFinite(close)) continue;
+      const ts = timestamps[i];
+      if (typeof ts !== 'number' || !Number.isFinite(ts)) continue;
       const bar: HistoricalBar = {
         symbol,
-        date: toUtcDateString(new Date(timestamps[i] * 1000)),
+        date: toUtcDateString(new Date(ts * 1000)),
         close,
       };
       const open = opens[i];
@@ -172,9 +284,29 @@ export async function fetchHistoricalDaily(
     }
 
     entry.ok = true;
+    setNote(bars.length === 0 ? 'EMPTY' : `OK ${bars.length} bars`);
     networkLog.push(entry);
     return bars;
   } finally {
     yahooInternals.requestSemaphore.release();
   }
+}
+
+/**
+ * Map a transport-layer exception to a short, human-readable reason string
+ * for the network log. We don't try to render the whole stack: the message
+ * already wraps "AbortError", "TypeError: Failed to fetch", or "net::ERR_*"
+ * with enough specificity that one of those tokens is what the user wants
+ * to see.
+ */
+function describeTransportError(err: unknown): string {
+  if (!err) return 'network';
+  const name = (err as any)?.name;
+  if (name === 'AbortError') return 'timeout';
+  const msg = (err as any)?.message;
+  if (typeof msg === 'string' && msg.length > 0) {
+    // Cap the length so the diagnostic table doesn't blow out the column.
+    return msg.slice(0, 80);
+  }
+  return 'network';
 }
