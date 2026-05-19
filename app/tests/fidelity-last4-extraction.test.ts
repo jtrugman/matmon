@@ -24,7 +24,7 @@
 // anymore because we require last4 at the import gate.
 
 import { describe, expect, it } from 'vitest';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { importCsv } from '../src/lib/importers';
 import { fidelityImporter } from '../src/lib/importers/fidelity';
@@ -36,6 +36,18 @@ import {
 import { slugifyAccountId } from '../src/lib/db/accountId';
 
 const EXAMPLE_DIR = resolve(process.cwd(), 'example_csv');
+const MULTI_FILE = resolve(EXAMPLE_DIR, 'multiple_accounts_fidelity.csv');
+const SINGLE_FILE = resolve(EXAMPLE_DIR, 'single_account_fidelity.csv');
+// example_csv/ is gitignored (contains real account numbers). CI runners
+// don't have these files; local dev does. Skip rather than fail when missing.
+const haveMulti = existsSync(MULTI_FILE);
+const haveSingle = existsSync(SINGLE_FILE);
+const describeMulti = haveMulti ? describe : describe.skip;
+const describeSingle = haveSingle ? describe : describe.skip;
+const describeBoth = haveMulti && haveSingle ? describe : describe.skip;
+if (!haveMulti || !haveSingle) {
+  console.info('[fidelity-last4-extraction.test] example_csv/ files missing, skipping (CI safe).');
+}
 
 /**
  * Mirror of the App.tsx + AddAccountView import-and-upsert pipeline, distilled
@@ -71,7 +83,7 @@ async function importMultiAccount(csv: string, brokerage: string): Promise<strin
   return insertedIds;
 }
 
-describe('Fidelity multi-account import extracts last4 per account', () => {
+describeMulti('Fidelity multi-account import extracts last4 per account', () => {
   it('surfaces accountsDetected with 4-digit last4 for both Individual and HSA', () => {
     const csv = readFileSync(resolve(EXAMPLE_DIR, 'multiple_accounts_fidelity.csv'), 'utf8');
     const r = importCsv(csv);
@@ -113,7 +125,7 @@ describe('Fidelity multi-account import extracts last4 per account', () => {
   });
 });
 
-describe('Fidelity single-account import is rejected at the import gate', () => {
+describeSingle('Fidelity single-account import is rejected at the import gate', () => {
   it('importCsv on single_account_fidelity.csv produces a structured rejection (no transactions)', () => {
     const csv = readFileSync(resolve(EXAMPLE_DIR, 'single_account_fidelity.csv'), 'utf8');
     const r = importCsv(csv);
@@ -184,7 +196,7 @@ describe('Fidelity single-account import is rejected at the import gate', () => 
   });
 });
 
-describe('Multi-account Fidelity dedup: re-import keeps the count at 2', () => {
+describeBoth('Multi-account Fidelity dedup: re-import keeps the count at 2', () => {
   it('multi then re-import multi: dedup keeps the count at 2', async () => {
     // Sanity that the standard multi-account dedup path still works: importing
     // the multi-account file twice produces 2 accounts, not 4. This isn't
