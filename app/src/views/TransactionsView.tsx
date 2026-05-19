@@ -1,7 +1,13 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { PageHead } from '../components/PageHead';
 import { EmptyState } from '../components/EmptyState';
-import { fmtMoney } from '../lib/format';
+import {
+  fmtMoney,
+  formatActionLabel,
+  matchesActionFilter,
+  type ActionFilterId,
+  type ActionTier,
+} from '../lib/format';
 import { loadAllTransactions } from '../lib/db/repos';
 import type { MatmonData } from '../data';
 
@@ -14,7 +20,12 @@ type DisplayTx = {
   id: string;
   date: Date;
   symbol: string;
-  action: 'buy' | 'sell' | 'div';
+  /** Raw action code from the importer (e.g. 'cash_in', 'transfer_in'). */
+  action: string;
+  /** Display label (e.g. "Deposit", "Transfer in"). */
+  actionLabel: string;
+  /** Visual tier for the badge color. */
+  tier: ActionTier;
   qty: number;
   price: number;
   amount: number | null;
@@ -24,7 +35,12 @@ type DisplayTx = {
 };
 
 type DateRange = '1M' | '3M' | 'YTD' | '1Y' | 'ALL';
-type ActionFilter = 'all' | 'buy' | 'sell' | 'div';
+/**
+ * Action-filter segment IDs. Sourced from format.ts so the predicate
+ * (`matchesActionFilter`) and its segment vocabulary live in one place
+ * and can be unit-tested without rendering the view.
+ */
+type ActionFilter = ActionFilterId;
 type PageSize = 25 | 50 | 100 | 200;
 
 // Range labels match the segmented control verbatim so any change to the
@@ -63,7 +79,7 @@ function computeCutoffDate(range: DateRange, now: Date = new Date()): Date | nul
 
 /**
  * Whimsical empty-state copy per (action filter, date range) combo. The keys
- * "all/buy/sell/div" mirror the segment IDs. When `dateRange === 'ALL'` we
+ * "all/buy/sell/div/cashflow" mirror the segment IDs. When `dateRange === 'ALL'` we
  * use the segment-specific punchline. Otherwise we lean on a range-aware
  * sentence so users understand "no buys in the last 30 days" vs. "no buys
  * ever".
@@ -94,6 +110,11 @@ function emptyCopyFor(
           title: 'Dividends are still on the way.',
           body: 'Patience pays. Nothing recorded yet.',
         };
+      case 'cashflow':
+        return {
+          title: 'No deposits or withdrawals on file.',
+          body: 'Capital coming soon?',
+        };
     }
   }
   const rangeLabel: Record<Exclude<DateRange, 'ALL'>, string> = {
@@ -123,6 +144,11 @@ function emptyCopyFor(
       return {
         title: 'No dividends posted.',
         body: `Nothing landed in ${window}.`,
+      };
+    case 'cashflow':
+      return {
+        title: 'No deposits or withdrawals in this range.',
+        body: 'Capital coming soon?',
       };
   }
 }
@@ -168,22 +194,20 @@ export function TransactionsView({ data, onAddAccount }: TransactionsViewProps) 
       try {
         const rows = await loadAllTransactions();
         if (cancelled) return;
+        // Map every real action code to its display label and tier. The tier
+        // drives both the badge color and which filter segment a row belongs
+        // to. A `cash_in` row now renders as a blue "Deposit" badge instead
+        // of being miscategorized as "BUY" in the old three-bucket scheme.
         const mapped: DisplayTx[] = rows
-          // Bucket every real action into the three buckets this view supports.
-          // Dividend reinvestments roll up under 'div' since the user's mental
-          // model is "I received a dividend".
           .map((r, idx) => {
-            const action: 'buy' | 'sell' | 'div' =
-              r.action === 'dividend' || r.action === 'div_reinvest' || r.action === 'interest'
-                ? 'div'
-                : r.action === 'sell' || r.action === 'transfer_out'
-                  ? 'sell'
-                  : 'buy';
+            const { label, tier } = formatActionLabel(r.action);
             return {
               id: `${r.id}-${idx}`,
               date: new Date(r.date),
               symbol: r.symbol || '',
-              action,
+              action: r.action,
+              actionLabel: label,
+              tier,
               qty: r.quantity,
               price: r.price,
               amount: r.amount,
@@ -221,7 +245,7 @@ export function TransactionsView({ data, onAddAccount }: TransactionsViewProps) 
     return allTxs.filter(t => {
       if (cutoffMs !== null && +t.date < cutoffMs) return false;
       if (filterAccount !== 'all' && t.accountId !== filterAccount) return false;
-      if (filterAction !== 'all' && t.action !== filterAction) return false;
+      if (!matchesActionFilter(filterAction, t.tier)) return false;
       if (q && !t.symbol.toLowerCase().includes(q)) return false;
       return true;
     });
@@ -229,8 +253,8 @@ export function TransactionsView({ data, onAddAccount }: TransactionsViewProps) 
 
   // Counts shown in the page header. We compute these against the dateRange
   // bucket so the "47 actions, last month" header agrees with the visible
-  // table. The buy/sell/div breakdown also respects dateRange so users can
-  // see "0 sells" in the meta line when filtering to a quiet window.
+  // table. The buy/sell/div/cashflow breakdown also respects dateRange so users
+  // can see "0 sells" in the meta line when filtering to a quiet window.
   const dateScoped = useMemo(() => {
     const cutoff = computeCutoffDate(dateRange);
     const cutoffMs = cutoff ? +cutoff : null;
@@ -239,9 +263,10 @@ export function TransactionsView({ data, onAddAccount }: TransactionsViewProps) 
   }, [allTxs, dateRange]);
   const counts = useMemo(
     () => ({
-      buy: dateScoped.filter(t => t.action === 'buy').length,
-      sell: dateScoped.filter(t => t.action === 'sell').length,
-      div: dateScoped.filter(t => t.action === 'div').length,
+      buy: dateScoped.filter(t => t.tier === 'buy').length,
+      sell: dateScoped.filter(t => t.tier === 'sell').length,
+      div: dateScoped.filter(t => t.tier === 'income').length,
+      cashflow: dateScoped.filter(t => t.tier === 'cashflow').length,
     }),
     [dateScoped],
   );
@@ -314,7 +339,7 @@ export function TransactionsView({ data, onAddAccount }: TransactionsViewProps) 
               {headerCount.toLocaleString()} actions, {rangeMeta[dateRange]}
             </div>
             <div style={{ marginTop: 2, color: 'var(--ink-4)' }}>
-              {counts.buy} buys · {counts.sell} sells · {counts.div} dividends
+              {counts.buy} buys · {counts.sell} sells · {counts.div} dividends · {counts.cashflow} cash flows
             </div>
           </div>
         }
@@ -360,12 +385,14 @@ export function TransactionsView({ data, onAddAccount }: TransactionsViewProps) 
             { id: 'buy' as const, label: 'Buys' },
             { id: 'sell' as const, label: 'Sells' },
             { id: 'div' as const, label: 'Dividends' },
+            { id: 'cashflow' as const, label: 'Cash flows' },
           ].map(o => (
             <button
               key={o.id}
               className={filterAction === o.id ? 'active' : ''}
               onClick={() => setFilterAction(o.id)}
               aria-pressed={filterAction === o.id}
+              data-testid={`tx-filter-${o.id}`}
             >
               {o.label}
             </button>
@@ -433,10 +460,19 @@ export function TransactionsView({ data, onAddAccount }: TransactionsViewProps) 
               </thead>
               <tbody>
                 {visibleRows.map(t => {
+                  // Amount fallback: if the importer didn't record an explicit
+                  // signed amount, derive it from qty * price for buys/sells
+                  // (buys are negative, sells positive). Cashflow rows always
+                  // carry an explicit amount from the importer so this path
+                  // only fires for legacy / synthesized rows.
                   const amount =
-                    t.amount != null ? t.amount : t.action === 'sell' ? +(t.qty * t.price) : -(t.qty * t.price);
+                    t.amount != null
+                      ? t.amount
+                      : t.tier === 'sell'
+                        ? +(t.qty * t.price)
+                        : -(t.qty * t.price);
                   return (
-                    <tr key={t.id}>
+                    <tr key={t.id} data-testid={`tx-row-${t.action}`}>
                       <td className="num">
                         {t.date.toLocaleDateString('en-US', {
                           month: 'short',
@@ -445,12 +481,19 @@ export function TransactionsView({ data, onAddAccount }: TransactionsViewProps) 
                         })}
                       </td>
                       <td>
-                        <span className={`activity-act ${t.action}`}>
-                          {t.action === 'div' ? 'Div' : t.action === 'buy' ? 'Buy' : 'Sell'}
+                        <span
+                          className={`activity-act ${t.tier}`}
+                          data-testid={`tx-action-${t.action}`}
+                        >
+                          {t.actionLabel}
                         </span>
                       </td>
                       <td>
-                        <span className="sym">{t.symbol}</span>
+                        {t.symbol ? (
+                          <span className="sym">{t.symbol}</span>
+                        ) : (
+                          <span className="muted" style={{ fontFamily: 'var(--font-mono)' }}>--</span>
+                        )}
                       </td>
                       <td style={{ fontSize: 12.5, color: 'var(--ink-2)' }}>{t.account}</td>
                       <td className="r num">

@@ -164,22 +164,31 @@ test.describe('Transactions view filters and pagination', () => {
     });
   });
 
-  test('Test B: filter chain composes (1M + Buys + search "VGT")', async ({ page }) => {
+  test('Test B: filter chain composes (1M + Cash flows + search "VGT")', async ({ page }) => {
+    // JPM positions get synthesized into transfer_in transactions by the
+    // holdings importer. The old test asserted these landed in the "Buys"
+    // bucket because the view used to coarse-bucket every transfer_in as a
+    // buy. After the cash-flow label fix, transfer_in rows correctly land
+    // in "Cash flows" with a "Transfer in" badge. We update this filter
+    // chain accordingly: the predictable JPM bucket is now cash flows.
+
     // 1M first. Capture the count.
     await page.getByRole('group', { name: /Filter by date range/i }).getByRole('button', { name: '1M' }).click();
     const afterRange = (await pageSummary(page))?.total ?? 0;
     expect(afterRange).toBeGreaterThan(0);
 
-    // Add Buys filter. JPM is all buys so the count should stay the same.
-    await page.getByRole('group', { name: /Filter by action/i }).getByRole('button', { name: 'Buys' }).click();
-    const afterBuys = (await pageSummary(page))?.total ?? 0;
-    expect(afterBuys).toBe(afterRange);
+    // Add Cash flows filter. JPM holdings are all transfer_in, so the
+    // 1M-scoped count should stay identical when we further narrow to
+    // cash flows only.
+    await page.getByTestId('tx-filter-cashflow').click();
+    const afterCashflow = (await pageSummary(page))?.total ?? 0;
+    expect(afterCashflow).toBe(afterRange);
 
-    // Add search "VGT". The filtered count must be <= afterBuys, and every
-    // visible row's symbol cell must include VGT.
+    // Add search "VGT". The filtered count must be <= afterCashflow, and
+    // every visible row's symbol cell must include VGT.
     await page.getByLabel(/Search transactions by symbol/i).fill('VGT');
     const afterSearch = (await pageSummary(page))?.total ?? 0;
-    expect(afterSearch).toBeLessThanOrEqual(afterBuys);
+    expect(afterSearch).toBeLessThanOrEqual(afterCashflow);
 
     // If any rows match, every visible row must have symbol VGT.
     if (afterSearch > 0) {
@@ -197,7 +206,7 @@ test.describe('Transactions view filters and pagination', () => {
     // composition doesn't strand state.)
     await page.getByLabel(/Search transactions by symbol/i).fill('');
     await page.getByRole('group', { name: /Filter by date range/i }).getByRole('button', { name: 'ALL' }).click();
-    await page.getByRole('group', { name: /Filter by action/i }).getByRole('button', { name: 'All' }).click();
+    await page.getByTestId('tx-filter-all').click();
     const restored = (await pageSummary(page))?.total ?? 0;
     expect(restored).toBeGreaterThan(200);
   });
