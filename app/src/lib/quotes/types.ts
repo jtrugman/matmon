@@ -43,4 +43,17 @@ export interface NetworkLogEntry {
   durationMs: number;
   ok: boolean;
   status?: number;
+  /**
+   * Optional structured outcome annotation surfaced in the Privacy panel.
+   * Examples produced by the historical backfill:
+   *   - "OK 247 bars" (success with bar count)
+   *   - "EMPTY" (Yahoo returned no bars, e.g. delisted ticker)
+   *   - "FAIL Not Found" (Yahoo error object propagated)
+   *   - "FAIL HTTP 429" (rate limited after retries)
+   *   - "FAIL network" (transport-layer failure)
+   *
+   * Kept optional so existing log entries (live quotes, instruments) don't
+   * have to be retrofitted: callers add a note when they have one to say.
+   */
+  note?: string;
 }

@@ -82,6 +82,9 @@ export function App() {
     recoveryNotice,
     recoveryInFlight,
     recoveryProgress,
+    recoveryError,
+    clearRecoveryError,
+    resetRecoveryAttempt,
   } = usePortfolio();
   const [tweaks, setTweak] = useTweaks(DEFAULTS);
 
@@ -647,6 +650,7 @@ export function App() {
             setTweak={setTweak}
             onRestartOnboarding={restartOnboarding}
             onReloadPortfolio={reload}
+            onResetRecoveryAttempt={resetRecoveryAttempt}
             onAutoRefreshChange={rebuildAutoRefresh}
           />
         );
@@ -705,6 +709,42 @@ export function App() {
             <div style={{ flex: 1 }}>
               <div className="toast-title">Loading chart history</div>
               <div className="toast-body">{recoveryNotice}</div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {recoveryError && !recoveryNotice && (
+        // Failure banner: shown when the most recent recovery attempt
+        // failed to land ANY bars. We never show this concurrently with
+        // the loading toast above (the !recoveryNotice gate) so the user
+        // doesn't see two toasts fighting for attention. Click anywhere
+        // to dismiss; the actual fix lives in Settings, Market data.
+        //
+        // Positioned ABOVE the standard toast slot (bottom: 110px instead
+        // of 24px) so it never overlaps a concurrent milestone toast and
+        // can't intercept pointer events that the user intended for the
+        // toast below it. The container keeps pointer-events: none from
+        // the .toast-container base style; only the inner clickable
+        // .toast region accepts clicks (for dismissal).
+        <div
+          className="toast-container"
+          role="alert"
+          aria-live="assertive"
+          data-testid="recovery-error-toast"
+          style={{ bottom: 110 }}
+        >
+          <div
+            className="toast"
+            onClick={clearRecoveryError}
+            style={{ cursor: 'pointer', borderColor: 'var(--loss)' }}
+          >
+            <div className="toast-glyph" style={{ color: 'var(--loss)' }}>
+              !
+            </div>
+            <div style={{ flex: 1 }}>
+              <div className="toast-title">Couldn't load chart history</div>
+              <div className="toast-body">{recoveryError}</div>
             </div>
           </div>
         </div>
