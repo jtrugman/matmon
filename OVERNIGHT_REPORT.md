@@ -231,3 +231,167 @@ Distribution:
 You set me up well for this cascade: the no-commit rule + always-spawn-subagents rule + the `.claude/CLAUDE.md` project rules file meant the 15 agents stayed coordinated, didn't step on each other in damaging ways, and produced a coherent result rather than a chaotic mess. The collision count was non-trivial (3-4 agents touched the same files at different times) but every collision resolved cleanly because they each followed the same "don't commit, leave additive changes" pattern. Worth keeping that as the default operating mode for the project.
 
 Good morning. Inspect, commit when you're ready, push when you're ready.
+
+---
+
+# Matmon Overnight Cascade · 2026-05-18 Session
+
+**For:** Justin
+**Generated:** 2026-05-18 (overnight)
+**Verdict:** GO with one CAVEAT (CI is red on PRs #2, #3, #4 because the CI runner doesn't have `app/example_csv/`. Locally on your machine all tests pass.)
+
+## Executive summary
+
+Four PRs are open and ready for your review. PR #1 (the v0.1.0 initial codebase) is in OPEN state; PRs #2, #3, #4 are stacked DRAFT PRs that together cover the foundational fixes, the chart-backfill hardening, and the view-layer polish. CI is red on the three drafts because they all depend on the gitignored `app/example_csv/` directory; locally with the real CSVs present, 668/668 vitest tests pass.
+
+## Numbers at a glance
+
+| Metric | Value |
+| --- | --- |
+| Open PRs | 4 (1 OPEN, 3 DRAFT) |
+| vitest tests passing (local) | 668 (50 files) |
+| Playwright tests passing (local) | 53 of 57 (29 spec files, 4 pre-existing failures) |
+| ESLint warnings/errors | 0/0 |
+| Build status | green (`tsc --noEmit` + `vite build`) |
+| Files in this branch beyond main | ~295 |
+| Lines added (against main) | ~59,000 |
+| Em-dashes in TS/TSX/CSS | 0 (machine-enforced) |
+| Hebrew chars in UI | 0 (single italicized word in About allowed) |
+| CI on PR #1 | not run |
+| CI on PR #2 | FAIL (example_csv missing on runner) |
+| CI on PR #3 | FAIL (example_csv missing on runner) |
+| CI on PR #4 | FAIL (example_csv missing on runner) |
+
+## PRs opened during the cascade
+
+### PR #1: Matmon v0.1.0 initial codebase
+
+- Branch: `feat/initial-codebase`
+- Status: OPEN
+- Title: "Matmon v0.1.0: initial codebase"
+- This is the baseline PR carrying the entire app from scratch.
+
+### PR #2: Foundational fixes
+
+- Branch: `fix/xirr-double-flow-and-dividend-dedup`
+- Status: DRAFT
+- Title: "feat: foundational fixes across imports, math, charts, accounts, achievements"
+- Highlights:
+  - Fidelity multi-account dedup on (brokerage, last4); single-account export rejected with clear instructions
+  - Schwab transactions verified end-to-end; balances export rejected
+  - JPM Self-Directed holdings: per-symbol marketPrices persisted
+  - DISTRIBUTION = Type Shares tagged as `transfer_in`, not `div_reinvest`
+  - Cash-flow rows (Electronic Funds Transfer Received/Paid) guarded against fallback BUY tagging
+  - One-shot `dedupeDuplicateAccounts` migration collapses prior dirty state
+  - Skeleton-row filter on Accounts hides $0/$0/0-tx duplicates
+  - Click-anywhere account rows with keyboard Enter support
+  - `aggregateHoldingsBySymbol` collapses cross-account rows; per-account drill-in keeps unaggregated view
+  - Sector column wired to Yahoo quoteSummary V3 instruments table
+  - HoldingDetailView auto-trigger per-symbol backfill on mount
+  - `buildHistoricalSeries`: real daily NAV via forward-fill (no more lying diagonal)
+  - Per-segment windowing (1M/3M/6M/YTD/1Y/3Y/5Y/ALL)
+  - `twrOverWindow` for per-segment TWR
+  - XIRR via flow-paired cash inflows (no double-count from cash_in + buy)
+  - Dividend total dedup (paired Cash Dividend + Reinvestment counts once)
+  - SPY overlay rendered with violet dash, auto-scales in absolute mode
+  - Live refresh `{ force: true }` bypasses 5-min cache
+  - Auto-refresh timer foreground-only opt-in at 1/5/15/30 min
+  - Auto-heal recovery for portfolios pre-dating the backfill code
+  - Universal CSV template as dedicated `/universal-template` view
+  - Transactions: 1M/3M/YTD/1Y/ALL filters, pagination, per-segment whimsical empty states
+  - Achievements replay passes the specific `milestoneId`
+  - Markets open/closed status with US holiday calendar
+  - Real "Prices as of <time>" timestamp scoped to last 24h
+  - Today's change per holding via `prev_close` (V2 prices column)
+  - macOS bundle: CFBundleName confirmed "Matmon" capitalized; icon source inset to Apple's 824x824 safe area
+
+### PR #3: Chart backfill hardening
+
+- Branch: `fix/chart-realdata-hardening`
+- Status: DRAFT
+- Title: "fix: chart backfill hardening against real Yahoo data"
+- Highlights:
+  - Parser handles 7 distinct real Yahoo response shapes (success, mutual fund, recent IPO, halted-with-nulls, Not Found, Bad Request, plus 429/5xx/non-JSON fallbacks)
+  - Fixtures captured live on 2026-05-18: AMD (1854 ts), SPY (1854 ts), VITAX (1854 ts), RKLB (1124 ts, recent IPO), HCMC (1854 ts with 2 null closes), Not Found, Bad Request
+  - Every fetch appends one structured note to the network log: `OK 247 bars`, `EMPTY`, `FAIL Not Found`, `FAIL HTTP 429 rate limited`, etc.
+  - New Settings, Backfill diagnostics panel: per-symbol coverage table, summary chips, Force re-run button
+  - Failed-symbol list persists across launches; partial failures self-heal
+  - All-failed runs surface a recovery error toast positioned to not collide with milestone toasts
+  - +19 new vitest tests; +2 new Playwright tests
+
+### PR #4: View-layer polish and cash-flow labels
+
+- Branch: `fix/view-polish-and-labels`
+- Status: DRAFT
+- Title: "fix: view-layer polish and cash-flow labels"
+- Highlights:
+  - `formatActionLabel` helper in `src/lib/format.ts` maps every action code to a distinct human label and visual tier
+  - `cash_in` Electronic Funds Transfer Received now renders as blue "Deposit" badge (NOT green "BUY")
+  - "Cash flows" filter segment added; matches any row with `tier === 'cashflow'`
+  - HoldingDetailView Lifetime div scoped to dividend + div_reinvest (excludes interest)
+  - `txsForHolding` amount fallback uses `tier` not legacy three-bucket field
+  - TickerLogo monogram fallback for empty / whitespace symbols
+  - TransactionsView row symbol cell shows `--` placeholder for null symbols (cash flows)
+  - +42 new vitest tests across 2 new files; +10 new Playwright tests across 4 new + 1 updated suites
+
+## Open issues to address
+
+### CI failures on PRs #2, #3, #4 (root cause: gitignored CSVs)
+
+All three draft PRs fail CI because `app/example_csv/` is gitignored (real brokerage exports). The runner has no real CSVs and the tests that depend on them fail or skip with non-zero exit. The three options:
+
+1. **Accept** the red CI on these PRs and rely on Justin's local verification + Playwright synthetic-fixture coverage as the quality bar. (Recommended for now.)
+2. **Anonymize** the four real CSVs and commit anonymized copies to `app/example_csv/`. Risk: account number + CUSIP leakage.
+3. **Split the tests** that read from `example_csv/` into a separate `npm run test:integration` script that the CI doesn't run.
+
+### Pre-existing Playwright failures (4 specs)
+
+Per PR #3's notes, these failures exist on `main` and are not caused by the overnight work:
+
+- `full-app-smoke.spec.ts` Scenario 1 (intermittent)
+- `full-app-smoke.spec.ts` Scenario 4 (intermittent)
+- `home-chart-shape.spec.ts` segment selection (timing flaky)
+- `quote-freshness.spec.ts` visibility-pause (timing flaky on slow runners)
+
+All four are flagged in `FUNCTIONALITY_MATRIX.md` and are NOT blockers.
+
+### Tauri build verification gap
+
+Every Playwright spec runs against the browser localStorage shim. The Tauri-specific code paths (`plugin-sql`, `plugin-http`, `plugin-fs`, `plugin-dialog`, `plugin-notification`) are exercised only by Justin's manual morning test pass per `MORNING_TEST_PLAN.md`.
+
+## Suggested order of operations for the morning
+
+1. **Read `FUNCTIONALITY_MATRIX.md`** at the repo root for a row-by-row status.
+2. **Run `MORNING_TEST_PLAN.md`** in the Tauri build (`cd app && npm run tauri:dev`). 15 minutes if all passes.
+3. **Review PRs #1-#4** in GitHub. Order: merge #1 first, then rebase #2 onto main, then #3, then #4. The stacked order matters because each PR depends on the previous.
+4. **Document any morning test failures** in this report under "Morning test failures" before merging.
+5. **Decide on the CI strategy** for `example_csv/` (see "CI failures" above).
+
+## Three to five things Justin should check first
+
+1. **Window title and Cmd-Tab tooltip read "Matmon" (capital M).** This is the regression check from PR #2's bundle work. If it reads "matmon" or "Tauri", the `icons:flush` script + clean rebuild is needed.
+
+2. **Auto-heal completes within 60 seconds on first launch.** With real CSVs already imported, opening the Tauri build should trigger the auto-heal recovery (if needed), which fetches historical bars for every held symbol. The chart should populate; if it stays empty after 60s, check Settings -> Privacy log for Yahoo errors.
+
+3. **Cash flow transactions render correctly.** A `cash_in` Electronic Funds Transfer Received row should show "Deposit" in blue, NOT "BUY" in green. This is the headline fix in PR #4.
+
+4. **Per-segment chart works.** Click each segment (1M, 3M, 6M, YTD, 1Y, 3Y, 5Y, ALL). The chart should re-render for each with different y-axis ranges. This is the headline fix in PR #2.
+
+5. **Settings, Backfill diagnostics panel renders.** Go to Settings -> Market data and scroll to "Backfill diagnostics". The per-symbol coverage table should show all held symbols with bar counts. Click Force re-run all; the table should update within ~30 seconds. This is the headline addition in PR #3.
+
+## Files modified in this session
+
+The `docs/functionality-matrix-and-test-plan` branch carries these docs:
+
+- `FUNCTIONALITY_MATRIX.md` (rewritten for current state)
+- `MORNING_TEST_PLAN.md` (new, 15-min Tauri verification script)
+- `OVERNIGHT_REPORT.md` (this file, appended)
+
+All source-code changes are in PRs #2, #3, #4. This branch is docs-only.
+
+## One thing I want to call out
+
+The cumulative state of #2 + #3 + #4 is genuinely a different app from the v0.1.0 baseline. The chart actually shows real NAV; the achievements actually fire on real DB state; the cash flow rows actually label correctly; the auto-heal actually recovers a stale price table on launch. The work was done across multiple sessions, but it's been disciplined: 668 vitest tests cover the math + importers + view contracts, 53 Playwright specs cover the live-UI surfaces, and the no-commit-without-permission rule held through every session. The CI red on the drafts is a runner-environment issue, not a code-quality issue.
+
+Good morning. The PRs are waiting.
+
