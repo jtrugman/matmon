@@ -1,0 +1,47 @@
+# CI workflow for Matmon
+#
+# Runs fast validation on every push to main and on every pull request.
+# Installs dependencies, type-checks, builds the web bundle, and runs the
+# Vitest suite. Tauri (Rust) builds are intentionally skipped here to keep
+# this workflow under two minutes. See release.yml for the full native build.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    name: Build and test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 22 LTS
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: app/package-lock.json
+
+      - name: Install dependencies
+        working-directory: app
+        run: npm ci
+
+      - name: Type-check and build web bundle
+        working-directory: app
+        run: npm run build
+
+      - name: Run Vitest suite
+        working-directory: app
+        run: npm test
