@@ -20,3 +20,9 @@ desktop.ini
 TODO.local.md
 NOTES.local.md
 .scratch/
+
+# Claude session artifacts: keep the project-rule file tracked so Claude can
+# read it on every session, but ignore everything else (lock files, scheduled
+# task state, image caches, worktrees).
+.claude/*
+!.claude/CLAUDE.md
